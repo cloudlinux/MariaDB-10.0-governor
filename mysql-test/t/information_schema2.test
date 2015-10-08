@@ -1,0 +1,22 @@
+
+#
+# MDEV-4029 SELECT on information_schema using a subquery locks up the information_schema table due to incorrect mutexes handling 
+#
+select variable_name from information_schema.session_status where variable_name =
+(select variable_name from information_schema.session_status where variable_name = 'uptime');
+select variable_name from information_schema.session_variables where variable_name =
+(select variable_name from information_schema.session_variables where variable_name = 'basedir');
+
+#
+# information_schema tables inside subqueries, they should not be re-populated
+# (i_s.columns needs to scan i_s itself, creating a tmp table for every i_s
+# table. if it's re-populated, it'll do that multiple times)
+#
+create table t1 (a char);
+insert t1 values ('a'),('t'),('z');
+flush status;
+select a, exists (select 1 from information_schema.columns where table_schema=concat('tes',a)) from t1;
+# fix the result in ps-protocol
+--replace_result 44 43
+show status like 'created_tmp_tables';
+drop table t1;
