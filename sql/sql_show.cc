@@ -430,8 +430,10 @@ bool mysqld_show_lvelist(THD *thd)
 		  protocol->store((const char *)chk_is_in_lve, system_charset_info);
 		  protocol->store((const char *)sql, system_charset_info);
 		  protocol->store((const char *)debug, system_charset_info);
-		  if (protocol->write())
+		  if (protocol->write()){
+			  release_info_retarray_lvedbug_info(ptr);
 			  DBUG_RETURN(TRUE);
+		  }
 	  }
 	  release_info_retarray_lvedbug_info(ptr);
   }

@@ -1226,14 +1226,14 @@ static void read_config_lvedebug_info() {
 				char *ptr = strchr(read_buff, '=');
 				if (ptr) {
 					ptr++;
-					strcmp(lve_options_storage.user_to_debug, ptr);
+					strncpy(lve_options_storage.user_to_debug, ptr, LVEMUTEX_USER_MAXSIZE-1);
 				}
 			}
 			if (strstr(read_buff, "path_to_save")) {
 				char *ptr = strchr(read_buff, '=');
 				if (ptr) {
 					ptr++;
-					strcmp(lve_options_storage.path_to_save, ptr);
+					strncpy(lve_options_storage.path_to_save, ptr, LVEMUTEX_SQL_MAXSIZE-1);
 				}
 			}
 			if (strstr(read_buff, "use_check")) {
@@ -1340,14 +1340,15 @@ void free_lvedebug_info() {
 
 static void set_current_info_lvedebug_info(int first, char *sql,
 		char *debug_info, int is_in_lve, int check_is_in_lve) {
+	pthread_mutex_lock(&current_debug_info.flag_m);
 	if (first) {
 		current_debug_info.chk_is_in_lve = check_is_in_lve;
 		current_debug_info.is_in_lve = is_in_lve;
 		current_debug_info.pid = gettid_lvedebug_info();
 		current_debug_info.ptr = NULL;
 		strncpy(current_debug_info.debug_info, debug_info,
-				sizeof(current_debug_info.debug_info));
-		strncpy(current_debug_info.sql, sql, sizeof(current_debug_info.sql));
+				sizeof(current_debug_info.debug_info)-1);
+		strncpy(current_debug_info.sql, sql, sizeof(current_debug_info.sql)-1);
 
 		mysql_online_statistic_lvedebug_info_list *ptr =
 				try_to_calloc_lvedebug_info_(1,
@@ -1369,14 +1370,13 @@ static void set_current_info_lvedebug_info(int first, char *sql,
 
 	} else {
 
-		pthread_mutex_lock(&current_debug_info.flag_m);
 		current_debug_info.chk_is_in_lve = check_is_in_lve;
 		current_debug_info.is_in_lve = is_in_lve;
 		strncpy(current_debug_info.debug_info, debug_info,
 				sizeof(current_debug_info.debug_info));
-		pthread_mutex_unlock(&current_debug_info.flag_m);
 
 	}
+	pthread_mutex_unlock(&current_debug_info.flag_m);
 }
 
 static void remove_current_info_lvedebug_info() {
@@ -1453,8 +1453,8 @@ static int save_data_to_file_lvedebug_info(mysql_mutex_info_runtime_out *chanks)
 void init_data_lvedebug_info(char *sql, char *user_name) {
 	if (lve_options_storage.debug_level) {
 		memset(&debug_info_storage, 0, sizeof(debug_info_storage));
-		strncpy(debug_info_storage.sql_req, sql, LVEMUTEX_SQL_MAXSIZE);
-		strncpy(debug_info_storage.user_name, user_name, LVEMUTEX_USER_MAXSIZE);
+		strncpy(debug_info_storage.sql_req, sql, LVEMUTEX_SQL_MAXSIZE-1);
+		strncpy(debug_info_storage.user_name, user_name, LVEMUTEX_USER_MAXSIZE-1);
 		set_current_info_lvedebug_info(1, debug_info_storage.sql_req, "INIT",
 				0, -1);
 	}
@@ -1517,7 +1517,7 @@ void make_snapshot_lvedebug_info(long number_of_in, long numbers_of_out,
 		strings = backtrace_symbols(array, size);
 		for (i = (((size - lve_options_storage.frame_deep) < 0) ? 0 : (size
 				- lve_options_storage.frame_deep)); i < size; i++) {
-			snprintf(snapshot_buf_ss2, LVEMUTEX_OUT_MAXSIZE, "%s # %s|",
+			snprintf(snapshot_buf_ss2, LVEMUTEX_OUT_MAXSIZE-1, "%s # %s|",
 					snapshot_buf_ss, strings[i]);
 			strncpy(snapshot_buf_ss, snapshot_buf_ss2, LVEMUTEX_OUT_MAXSIZE);
 		}
@@ -1636,8 +1636,8 @@ int send_to_client_debug_data_lvedebug_info(void *buffer, int max_size) {
 				(*buffer_i).chk_is_in_lve = ptr->ptr->chk_is_in_lve;
 				(*buffer_i).is_in_lve = ptr->ptr->is_in_lve;
 				(*buffer_i).pid = ptr->ptr->pid;
-				strncpy((*buffer_i).sql, ptr->ptr->sql, LVEMUTEX_OUT_MAXSIZE);
-				strncpy((*buffer_i).debug_info, ptr->ptr->debug_info, LVEMUTEX_OUT_MAXSIZE);
+				strncpy((*buffer_i).sql, ptr->ptr->sql, LVEMUTEX_OUT_MAXSIZE-1);
+				strncpy((*buffer_i).debug_info, ptr->ptr->debug_info, LVEMUTEX_OUT_MAXSIZE-1);
 				pthread_mutex_unlock(&ptr->ptr->flag_m);
 				buffer_i++;
 				counter--;
@@ -1729,8 +1729,10 @@ int governor_add_mysql_thread_info() {
                        (uchar *) buf, sizeof(buf));
        if (!mm) {
                mm = (mysql_mutex *) calloc(1, sizeof(mysql_mutex));
-               if (!mm)
+               if (!mm){
+            	       pthread_mutex_unlock(&mtx_mysql_lve_mutex_governor_ptr);
                        return -1;
+               }
                mm->key = (pid_t *)syscall(__NR_gettid);
                if (my_hash_insert(mysql_lve_mutex_governor, (uchar *) mm)) {
                        free(mm);

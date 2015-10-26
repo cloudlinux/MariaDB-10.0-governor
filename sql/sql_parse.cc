@@ -8838,7 +8838,7 @@ uint kill_user_thread(THD *thd, char *user, bool only_kill_query)
   {
 	if (tmp->get_command() == COM_DAEMON)
 		continue;
-    if((tmp)&&(user)&&(tmp->get_user_connect())&&(tmp->get_user_connect()->user)){
+    if(user&&(tmp->get_user_connect())&&(tmp->get_user_connect()->user)){
       if (!strncmp(tmp->get_user_connect()->user,user,16))
       {
     	mysql_mutex_lock(&tmp->LOCK_thd_data);  // Lock from delete
@@ -8856,8 +8856,8 @@ uint kill_user_thread(THD *thd, char *user, bool only_kill_query)
 	  while ((thd_tmp=it_tmp++)){
 	      tmp=thd_tmp->ptr;
 
-	      if ((tmp)&&((thd->security_ctx->master_access & SUPER_ACL) ||
-	    		  thd->security_ctx->user_matches(tmp->security_ctx)))
+	      if ((thd->security_ctx->master_access & SUPER_ACL) ||
+	    		  thd->security_ctx->user_matches(tmp->security_ctx))
 	      {
 	    	  tmp->awake(only_kill_query ? KILL_QUERY : KILL_CONNECTION);
 	    	  error=0;
@@ -8886,7 +8886,7 @@ uint kill_user_thread_lve(THD *thd, char *user, bool only_kill_query)
   I_List_iterator<THD> it(threads);
   while ((tmp=it++))
   {
-    if((tmp)&&(user)&&(tmp->get_user_connect())&&(tmp->get_user_connect()->user)){
+    if(user&&(tmp->get_user_connect())&&(tmp->get_user_connect()->user)){
       if (!strncmp(tmp->get_user_connect()->user,user,16))
       {
     	  mysql_mutex_lock(&tmp->LOCK_thd_data);  // Lock from delete
@@ -8902,8 +8902,8 @@ uint kill_user_thread_lve(THD *thd, char *user, bool only_kill_query)
          I_List_iterator<i_thd> it_tmp(threads_tmp);
          while ((thd_tmp=it_tmp++)){
                   tmp=thd_tmp->ptr;
-                 if ((tmp)&&((thd->security_ctx->master_access & SUPER_ACL) ||
-                      thd->security_ctx->user_matches(tmp->security_ctx)))
+                 if ((thd->security_ctx->master_access & SUPER_ACL) ||
+                      thd->security_ctx->user_matches(tmp->security_ctx))
                  {
                    if(tmp->thread_tid_cll){
                        governor_setlve_mysql_thread_info(tmp->thread_tid_cll);
