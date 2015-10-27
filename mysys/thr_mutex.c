@@ -1340,8 +1340,9 @@ void free_lvedebug_info() {
 
 static void set_current_info_lvedebug_info(int first, char *sql,
 		char *debug_info, int is_in_lve, int check_is_in_lve) {
-	pthread_mutex_lock(&current_debug_info.flag_m);
+
 	if (first) {
+		pthread_mutex_lock(&current_debug_info.flag_m);
 		current_debug_info.chk_is_in_lve = check_is_in_lve;
 		current_debug_info.is_in_lve = is_in_lve;
 		current_debug_info.pid = gettid_lvedebug_info();
@@ -1355,6 +1356,7 @@ static void set_current_info_lvedebug_info(int first, char *sql,
 						sizeof(mysql_online_statistic_lvedebug_info_list));
 		if (ptr) {
 			current_debug_info.ptr = ptr;
+			pthread_mutex_unlock(&current_debug_info.flag_m);
 			ptr->ptr = &current_debug_info;
 			pthread_mutex_lock(&lve_options_storage.lock);
 			if (!lve_options_storage.tail) {
@@ -1366,17 +1368,19 @@ static void set_current_info_lvedebug_info(int first, char *sql,
 				lve_options_storage.tail = ptr;
 			}
 			pthread_mutex_unlock(&lve_options_storage.lock);
+		} else {
+			pthread_mutex_unlock(&current_debug_info.flag_m);
 		}
 
 	} else {
-
+		pthread_mutex_lock(&current_debug_info.flag_m);
 		current_debug_info.chk_is_in_lve = check_is_in_lve;
 		current_debug_info.is_in_lve = is_in_lve;
 		strncpy(current_debug_info.debug_info, debug_info,
 				sizeof(current_debug_info.debug_info)-1);
-
+		pthread_mutex_unlock(&current_debug_info.flag_m);
 	}
-	pthread_mutex_unlock(&current_debug_info.flag_m);
+
 }
 
 static void remove_current_info_lvedebug_info() {
@@ -1531,7 +1535,7 @@ void make_snapshot_lvedebug_info(long number_of_in, long numbers_of_out,
 					sizeof(mysql_mutex_info_runtime_out));
 			if (ptr) {
 				ptr->tm = time(NULL);
-				snprintf(ptr->chunk_to_out, LVEMUTEX_OUT_MAXSIZE,
+				snprintf(ptr->chunk_to_out, LVEMUTEX_OUT_MAXSIZE-1,
 						"%d %s SQL %s U:%s", gettid_lvedebug_info(), fname,
 						debug_info_storage.sql_req,
 						debug_info_storage.user_name);
@@ -1632,13 +1636,13 @@ int send_to_client_debug_data_lvedebug_info(void *buffer, int max_size) {
 				lve_options_storage.head;
 		while (ptr) {
 			if (ptr->ptr) {
-				pthread_mutex_lock(&ptr->ptr.flag_m);
+				pthread_mutex_lock(&ptr->ptr->flag_m);
 				(*buffer_i).chk_is_in_lve = ptr->ptr->chk_is_in_lve;
 				(*buffer_i).is_in_lve = ptr->ptr->is_in_lve;
 				(*buffer_i).pid = ptr->ptr->pid;
 				strncpy((*buffer_i).sql, ptr->ptr->sql, LVEMUTEX_OUT_MAXSIZE-1);
 				strncpy((*buffer_i).debug_info, ptr->ptr->debug_info, LVEMUTEX_OUT_MAXSIZE-1);
-				pthread_mutex_unlock(&ptr->ptr.flag_m);
+				pthread_mutex_unlock(&ptr->ptr->flag_m);
 				buffer_i++;
 				counter--;
 				if (counter == 0)
