@@ -1373,7 +1373,7 @@ static void set_current_info_lvedebug_info(int first, char *sql,
 		current_debug_info.chk_is_in_lve = check_is_in_lve;
 		current_debug_info.is_in_lve = is_in_lve;
 		strncpy(current_debug_info.debug_info, debug_info,
-				sizeof(current_debug_info.debug_info));
+				sizeof(current_debug_info.debug_info)-1);
 
 	}
 	pthread_mutex_unlock(&current_debug_info.flag_m);
@@ -1519,7 +1519,7 @@ void make_snapshot_lvedebug_info(long number_of_in, long numbers_of_out,
 				- lve_options_storage.frame_deep)); i < size; i++) {
 			snprintf(snapshot_buf_ss2, LVEMUTEX_OUT_MAXSIZE-1, "%s # %s|",
 					snapshot_buf_ss, strings[i]);
-			strncpy(snapshot_buf_ss, snapshot_buf_ss2, LVEMUTEX_OUT_MAXSIZE);
+			strncpy(snapshot_buf_ss, snapshot_buf_ss2, LVEMUTEX_OUT_MAXSIZE-1);
 		}
 		free(strings);
 		set_current_info_lvedebug_info(0, "SQL", snapshot_buf_ss,
@@ -1632,13 +1632,13 @@ int send_to_client_debug_data_lvedebug_info(void *buffer, int max_size) {
 				lve_options_storage.head;
 		while (ptr) {
 			if (ptr->ptr) {
-				pthread_mutex_lock(&ptr->ptr->flag_m);
+				pthread_mutex_lock(&ptr->ptr.flag_m);
 				(*buffer_i).chk_is_in_lve = ptr->ptr->chk_is_in_lve;
 				(*buffer_i).is_in_lve = ptr->ptr->is_in_lve;
 				(*buffer_i).pid = ptr->ptr->pid;
 				strncpy((*buffer_i).sql, ptr->ptr->sql, LVEMUTEX_OUT_MAXSIZE-1);
 				strncpy((*buffer_i).debug_info, ptr->ptr->debug_info, LVEMUTEX_OUT_MAXSIZE-1);
-				pthread_mutex_unlock(&ptr->ptr->flag_m);
+				pthread_mutex_unlock(&ptr->ptr.flag_m);
 				buffer_i++;
 				counter--;
 				if (counter == 0)
