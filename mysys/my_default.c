@@ -90,7 +90,7 @@ static my_bool defaults_already_read= FALSE;
 
 /* Which directories are searched for options (and in which order) */
 
-#define MAX_DEFAULT_DIRS 6
+#define MAX_DEFAULT_DIRS 7
 #define DEFAULT_DIRS_SIZE (MAX_DEFAULT_DIRS + 1)  /* Terminate with NULL */
 static const char **default_directories = NULL;
 
@@ -364,7 +364,7 @@ err:
 
   RETURN
     0 - ok
-    1 - error occured
+    1 - error occurred
 */
 
 static int handle_default_option(void *in_ctx, const char *group_name,
@@ -577,6 +577,7 @@ int my_load_defaults(const char *conf_file, const char **groups,
                                      handle_default_option, (void *) &ctx,
                                      dirs)))
   {
+    delete_dynamic(&args);
     free_root(&alloc,MYF(0));
     DBUG_RETURN(error);
   }
@@ -1218,7 +1219,12 @@ static const char **init_default_directories(MEM_ROOT *alloc)
     errors += add_directory(alloc, "C:/", dirs);
 
     if (my_get_module_parent(fname_buffer, sizeof(fname_buffer)) != NULL)
+    {
       errors += add_directory(alloc, fname_buffer, dirs);
+
+      strncat(fname_buffer, "/data", sizeof(fname_buffer));
+      errors += add_directory(alloc, fname_buffer, dirs);
+    }
   }
 
 #else

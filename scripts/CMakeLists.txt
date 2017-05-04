@@ -361,33 +361,6 @@ ELSE()
       COMPONENT ${${file}_COMPONENT}
      )
   ENDFOREACH()
-
-  # files for systemd
-  SET(SYSTEMD_SCRIPTS
-    mysql.tmpfiles.d
-    mysql.service
-    mysql-prepare-db-dir
-    mysql-wait-ready
-    mysql-check-socket
-    mysql-scripts-common
-    mysql_config_multilib
-    mysql.init
-    mysql-compat.service
-    mysql-compat.conf
-    my.cnf
-  )
-  FOREACH(file ${SYSTEMD_SCRIPTS})
-    IF(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${file}.sh)
-      CONFIGURE_FILE(${CMAKE_CURRENT_SOURCE_DIR}/${file}.sh
-        ${CMAKE_CURRENT_BINARY_DIR}/${file} ESCAPE_QUOTES @ONLY)
-    ELSEIF(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${file}.in)
-      CONFIGURE_FILE(${CMAKE_CURRENT_SOURCE_DIR}/${file}.in
-        ${CMAKE_CURRENT_BINARY_DIR}/${file} ESCAPE_QUOTES @ONLY)
-    ELSE()
-      MESSAGE(FATAL_ERROR "Can not find ${file}.sh or ${file}.in in "
-        "${CMAKE_CURRENT_SOURCE_DIR}" )
-    ENDIF()
-  ENDFOREACH()
 ENDIF()
 
 # Install libgcc as  mylibgcc.a

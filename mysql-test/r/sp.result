@@ -4323,57 +4323,57 @@ test.t1	repair	status	OK
 test.t2	repair	status	OK
 test.t3	repair	status	OK
 test.v1	repair	Error	'test.v1' is not BASE TABLE
-test.v1	repair	error	Corrupt
+test.v1	repair	status	Operation failed
 Table	Op	Msg_type	Msg_text
 test.t1	optimize	status	OK
 test.t2	optimize	status	OK
 test.t3	optimize	status	OK
 test.v1	optimize	Error	'test.v1' is not BASE TABLE
-test.v1	optimize	error	Corrupt
+test.v1	optimize	status	Operation failed
 Table	Op	Msg_type	Msg_text
 test.t1	analyze	status	Table is already up to date
 test.t2	analyze	status	Table is already up to date
 test.t3	analyze	status	Table is already up to date
 test.v1	analyze	Error	'test.v1' is not BASE TABLE
-test.v1	analyze	error	Corrupt
+test.v1	analyze	status	Operation failed
 call bug13012()|
 Table	Op	Msg_type	Msg_text
 test.t1	repair	status	OK
 test.t2	repair	status	OK
 test.t3	repair	status	OK
 test.v1	repair	Error	'test.v1' is not BASE TABLE
-test.v1	repair	error	Corrupt
+test.v1	repair	status	Operation failed
 Table	Op	Msg_type	Msg_text
 test.t1	optimize	status	OK
 test.t2	optimize	status	OK
 test.t3	optimize	status	OK
 test.v1	optimize	Error	'test.v1' is not BASE TABLE
-test.v1	optimize	error	Corrupt
+test.v1	optimize	status	Operation failed
 Table	Op	Msg_type	Msg_text
 test.t1	analyze	status	Table is already up to date
 test.t2	analyze	status	Table is already up to date
 test.t3	analyze	status	Table is already up to date
 test.v1	analyze	Error	'test.v1' is not BASE TABLE
-test.v1	analyze	error	Corrupt
+test.v1	analyze	status	Operation failed
 call bug13012()|
 Table	Op	Msg_type	Msg_text
 test.t1	repair	status	OK
 test.t2	repair	status	OK
 test.t3	repair	status	OK
 test.v1	repair	Error	'test.v1' is not BASE TABLE
-test.v1	repair	error	Corrupt
+test.v1	repair	status	Operation failed
 Table	Op	Msg_type	Msg_text
 test.t1	optimize	status	OK
 test.t2	optimize	status	OK
 test.t3	optimize	status	OK
 test.v1	optimize	Error	'test.v1' is not BASE TABLE
-test.v1	optimize	error	Corrupt
+test.v1	optimize	status	Operation failed
 Table	Op	Msg_type	Msg_text
 test.t1	analyze	status	Table is already up to date
 test.t2	analyze	status	Table is already up to date
 test.t3	analyze	status	Table is already up to date
 test.v1	analyze	Error	'test.v1' is not BASE TABLE
-test.v1	analyze	error	Corrupt
+test.v1	analyze	status	Operation failed
 drop procedure bug13012|
 drop view v1|
 select * from t1 order by data|
@@ -7713,6 +7713,7 @@ Handler_read_key	0
 Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	0
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	0
@@ -7724,6 +7725,7 @@ Handler_read_key	2
 Handler_read_last	0
 Handler_read_next	4097
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	0
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	0
@@ -7857,4 +7859,134 @@ v1
 6
 DROP PROCEDURE p1;
 DROP TABLE t1;
+#
+# MDEV-10713: signal 11 error on multi-table update - crash in
+# handler::increment_statistics or in make_select or assertion
+# failure pfs_thread == ((PFS_thread*) pthread_getspecific((THR_PFS)))
+#
+CREATE TABLE `t1` (
+`CLOSE_YN` varchar(10) COLLATE utf8_bin DEFAULT NULL
+) DEFAULT CHARSET=utf8 COLLATE=utf8_bin ;
+CREATE TABLE `t2` (
+`ap_close_to` varchar(8) COLLATE utf8_bin DEFAULT NULL
+) DEFAULT CHARSET=utf8 COLLATE=utf8_bin ;
+insert t1 values (1);
+CREATE  FUNCTION `f1`(`P_DC_CD` VARBINARY(50), `P_SYS_DATE` DATETIME) RETURNS datetime
+DETERMINISTIC
+SQL SECURITY INVOKER
+BEGIN
+DECLARE V_SYS_DATE DATETIME;
+SELECT now() AS LOC_DATE INTO V_SYS_DATE ;
+RETURN v_sys_date ;
+END $$
+update t1 S
+JOIN
+(
+SELECT CASE
+WHEN DATE_FORMAT( f1('F01', NOW()) , '%Y%m%d') <= CLOSE_YMD
+THEN '99991231'
+	     ELSE '' END ACCOUNT_APPLY_YYYYMMDD
+FROM (
+select case
+when 'AP'='AP'
+                   then ap_close_to
+end AS CLOSE_YMD
+from t2
+) A
+) X
+SET S.CLOSE_YN = ''
+where 1=1;
+drop function if exists f1;
+drop table t1,t2;
 # End of 5.5 test
+#
+#  MDEV-7040: Crash in field_conv, memcpy_field_possible, part#2
+#
+create table t1 (
+col1 bigint(20),
+col2 char(1),
+col3 char(2)
+);
+insert into t1 values (1,'a','a'), (2,'b','b');
+create table t2 as select * from t1;
+create table t3 as select * from t1;
+create table t4 as select * from t1;
+create table t5 as select * from t1;
+create table t6 as select * from t1;
+flush tables;
+CREATE PROCEDURE p1()
+begin
+DECLARE _var1 bigint(20) UNSIGNED;
+DECLARE _var2 CHAR(1) DEFAULT NULL;
+DECLARE _var3 CHAR(1) DEFAULT NULL;
+DECLARE _done BOOLEAN DEFAULT 0;
+declare cur1 cursor for
+select col1, col2, col3 
+from t1 
+where 
+col1 in (select t2.col1 from t2 where t2.col2=t1.col2) or
+col2 in (select t3.col3 from t3 where t3.col3=t1.col2) ;
+DECLARE CONTINUE HANDLER FOR NOT FOUND SET _done = 1;
+OPEN cur1;
+set _var1 = (select _var1 from t4 limit 1);
+set _var1 = (select _var1 from t5 limit 1);
+set _var1 = (select _var1 from t6 limit 1);
+label1:
+LOOP
+SET _done = 0;
+FETCH cur1 INTO _var1, _var2, _var3;
+IF _done THEN
+LEAVE label1;
+END IF;
+END LOOP label1;
+CLOSE cur1;
+end|
+set @tmp_toc= @@table_open_cache;
+set @tmp_tdc= @@table_definition_cache;
+set global table_open_cache=1;
+set global table_definition_cache=1;
+Warnings:
+Warning	1292	Truncated incorrect table_definition_cache value: '1'
+call p1();
+set global table_open_cache= @tmp_toc;
+set global table_definition_cache= @tmp_tdc;
+drop procedure p1;
+drop table t1,t2,t3,t4,t5,t6;
+#
+# MDEV-11935: Queries in stored procedures with and
+# EXISTS(SELECT * FROM VIEW) crashes and closes hte conneciton.
+#
+CREATE TABLE ANY_TABLE (
+ENTITY_UID    BIGINT NOT NULL
+);
+CREATE TABLE SECURITY_PATH(
+origid BIGINT UNSIGNED NOT NULL,
+destid BIGINT UNSIGNED NOT NULL,
+KEY (destid)
+);
+CREATE VIEW ENTITY_ACCESS (
+ENTITY_UID,
+OWNER_UID
+) AS
+SELECT SP1.origid,
+SP2.destid
+FROM SECURITY_PATH SP1
+JOIN SECURITY_PATH SP2 ON SP1.destid = SP2.origid
+;
+CREATE PROCEDURE SP_EXAMPLE_SELECT ()
+BEGIN
+SELECT *
+FROM ANY_TABLE AT1
+WHERE EXISTS ( SELECT *
+FROM ENTITY_ACCESS EA
+WHERE AT1.ENTITY_UID = EA.ENTITY_UID
+AND   EA.OWNER_UID IS NULL );
+END
+//
+CALL SP_EXAMPLE_SELECT ();
+ENTITY_UID
+CALL SP_EXAMPLE_SELECT ();
+ENTITY_UID
+drop procedure SP_EXAMPLE_SELECT;
+drop view ENTITY_ACCESS;
+drop table ANY_TABLE, SECURITY_PATH;

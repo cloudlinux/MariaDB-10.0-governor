@@ -1,9 +1,9 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2013, Oracle and/or its affiliates. All rights reserved.
+Copyright (c) 1995, 2016, Oracle and/or its affiliates. All rights reserved.
 Copyright (c) 2008, 2009, Google Inc.
 Copyright (c) 2009, Percona Inc.
-Copyright (c) 2013, 2014, SkySQL Ab. All Rights Reserved.
+Copyright (c) 2013, 2017, MariaDB Corporation Ab. All Rights Reserved.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -145,13 +145,16 @@ extern const char*	srv_main_thread_op_info;
 /** Prefix used by MySQL to indicate pre-5.1 table name encoding */
 extern const char	srv_mysql50_table_name_prefix[10];
 
-/* The monitor thread waits on this event. */
+/** Event to signal srv_monitor_thread. Not protected by a mutex.
+Set after setting srv_print_innodb_monitor. */
 extern os_event_t	srv_monitor_event;
 
-/* The error monitor thread waits on this event. */
+/** Event to signal the shutdown of srv_error_monitor_thread.
+Not protected by a mutex. */
 extern os_event_t	srv_error_event;
 
-/** The buffer pool dump/load thread waits on this event. */
+/** Event for waking up buf_dump_thread. Not protected by a mutex.
+Set on shutdown or by buf_dump_start() or buf_load_start(). */
 extern os_event_t	srv_buf_dump_event;
 
 /** The buffer pool dump/load file name */
@@ -200,6 +203,9 @@ extern char*	srv_arch_dir;
 recovery and open all tables in RO mode instead of RW mode. We don't
 sync the max trx id to disk either. */
 extern my_bool	srv_read_only_mode;
+/** Set if InnoDB operates in read-only mode or innodb-force-recovery
+is greater than SRV_FORCE_NO_TRX_UNDO. */
+extern my_bool	high_level_read_only;
 /** store to its own file each table created by an user; data
 dictionary tables are in the system tablespace 0 */
 extern my_bool	srv_file_per_table;
@@ -230,6 +236,7 @@ OS (provided we compiled Innobase with it in), otherwise we will
 use simulated aio we build below with threads.
 Currently we support native aio on windows and linux */
 extern my_bool	srv_use_native_aio;
+extern my_bool	srv_numa_interleave;
 #ifdef __WIN__
 extern ibool	srv_use_native_conditions;
 #endif /* __WIN__ */
@@ -293,6 +300,8 @@ extern ulong	srv_flush_neighbors;	/*!< whether or not to flush
 					neighbors of a block */
 extern ulint	srv_buf_pool_old_size;	/*!< previously requested size */
 extern ulint	srv_buf_pool_curr_size;	/*!< current size in bytes */
+extern ulong	srv_buf_pool_dump_pct;	/*!< dump that may % of each buffer
+					pool during BP dump */
 extern ulint	srv_mem_pool_size;
 extern ulint	srv_lock_table_size;
 
@@ -339,9 +348,6 @@ extern double	srv_adaptive_flushing_lwm;
 extern ulong	srv_flushing_avg_loops;
 
 extern ulong	srv_force_recovery;
-#ifndef DBUG_OFF
-extern ulong	srv_force_recovery_crash;
-#endif /* !DBUG_OFF */
 
 extern ulint	srv_fast_shutdown;	/*!< If this is 1, do not do a
 					purge and index buffer merge.
@@ -358,6 +364,7 @@ extern unsigned long long	srv_stats_persistent_sample_pages;
 extern my_bool			srv_stats_auto_recalc;
 extern unsigned long long	srv_stats_modified_counter;
 extern my_bool			srv_stats_sample_traditional;
+extern my_bool			srv_stats_include_delete_marked;
 
 extern ibool	srv_use_doublewrite_buf;
 extern ulong	srv_doublewrite_batch_size;
@@ -752,7 +759,7 @@ UNIV_INTERN
 os_thread_ret_t
 DECLARE_THREAD(srv_purge_coordinator_thread)(
 /*=========================================*/
-	void*	arg __attribute__((unused)));	/*!< in: a dummy parameter
+	void*	arg MY_ATTRIBUTE((unused)));	/*!< in: a dummy parameter
 						required by os_thread_create */
 
 /*********************************************************************//**
@@ -762,7 +769,7 @@ UNIV_INTERN
 os_thread_ret_t
 DECLARE_THREAD(srv_worker_thread)(
 /*==============================*/
-	void*	arg __attribute__((unused)));	/*!< in: a dummy parameter
+	void*	arg MY_ATTRIBUTE((unused)));	/*!< in: a dummy parameter
 						required by os_thread_create */
 } /* extern "C" */
 
@@ -774,17 +781,12 @@ ulint
 srv_get_task_queue_length(void);
 /*===========================*/
 
-/*********************************************************************//**
-Releases threads of the type given from suspension in the thread table.
-NOTE! The server mutex has to be reserved by the caller!
-@return number of threads released: this may be less than n if not
-enough threads were suspended at the moment */
-UNIV_INTERN
-ulint
-srv_release_threads(
-/*================*/
-	enum srv_thread_type	type,	/*!< in: thread type */
-	ulint			n);	/*!< in: number of threads to release */
+/** Ensure that a given number of threads of the type given are running
+(or are already terminated).
+@param[in]	type	thread type
+@param[in]	n	number of threads that have to run */
+void
+srv_release_threads(enum srv_thread_type type, ulint n);
 
 /**********************************************************************//**
 Check whether any background thread are active. If so print which thread
@@ -795,12 +797,10 @@ const char*
 srv_any_background_threads_are_active(void);
 /*=======================================*/
 
-/**********************************************************************//**
-Wakeup the purge threads. */
+/** Wake up the purge threads. */
 UNIV_INTERN
 void
-srv_purge_wakeup(void);
-/*==================*/
+srv_purge_wakeup();
 
 /** Status variables to be passed to MySQL */
 struct export_var_t{
@@ -901,6 +901,7 @@ struct srv_slot_t{
 #else /* !UNIV_HOTBACKUP */
 # define srv_use_adaptive_hash_indexes		FALSE
 # define srv_use_native_aio			FALSE
+# define srv_numa_interleave			FALSE
 # define srv_force_recovery			0UL
 # define srv_set_io_thread_op_info(t,info)	((void) 0)
 # define srv_reset_io_thread_op_info()		((void) 0)

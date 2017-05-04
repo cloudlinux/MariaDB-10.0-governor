@@ -276,6 +276,7 @@ Handler_read_key	0
 Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	0
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	0
@@ -289,6 +290,7 @@ Handler_read_key	0
 Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	2
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	9
@@ -301,6 +303,7 @@ Handler_read_key	0
 Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	0
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	0
@@ -313,6 +316,7 @@ Handler_read_key	0
 Handler_read_last	1
 Handler_read_next	0
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	0
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	0
@@ -326,6 +330,7 @@ Handler_read_key	0
 Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	1
 Handler_read_rnd_deleted	2
 Handler_read_rnd_next	7
@@ -381,6 +386,7 @@ Handler_read_key	1
 Handler_read_last	0
 Handler_read_next	1
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	1
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	0
@@ -420,6 +426,7 @@ Handler_read_key	1
 Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	0
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	0
@@ -432,6 +439,7 @@ Handler_read_key	2
 Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	0
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	0
@@ -443,6 +451,7 @@ Handler_read_key	3
 Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	0
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	0
@@ -454,6 +463,7 @@ Handler_read_key	3
 Handler_read_last	0
 Handler_read_next	0
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	0
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	0
@@ -561,6 +571,21 @@ ERROR HY000: View 'test.v1' references invalid table(s) or column(s) or function
 DROP VIEW v1;
 DROP FUNCTION f1;
 DROP TABLE t1;
+# Bug #21143080: UPDATE ON VARCHAR AND TEXT COLUMNS PRODUCE INCORRECT
+#                RESULTS
+CREATE TABLE t1 (a VARCHAR(50), b TEXT, c CHAR(50)) ENGINE=INNODB;
+INSERT INTO t1 (a, b, c) VALUES ('start trail', '', 'even longer string');
+UPDATE t1 SET b = a, a = 'inject';
+SELECT a, b FROM t1;
+a	b
+inject	start trail
+UPDATE t1 SET b = c, c = 'inject';
+SELECT c, b FROM t1;
+c	b
+inject	even longer string
+DROP TABLE t1;
+#
+# MDEV-3948 Assertion `records_are_comparable(table)' fails in compare_record(const TABLE*) on UPDATE with simple AND condition, index_merge+index_merge_intersection, InnoDB
 #
 # Verify that UPDATE does the same number of handler_update
 # operations, no matter if there is ORDER BY or not.
@@ -604,6 +629,65 @@ Handler_update	5
 ROLLBACK;
 DROP TABLE t1, t2;
 #
+# MDEV-8938: Server Crash on Update with joins
+#
+CREATE TABLE `t1` (
+`name` varchar(255) NOT NULL,
+`value` varchar(4095) DEFAULT NULL,
+PRIMARY KEY (`name`)
+);
+UPDATE `t1` SET value = CONCAT("*.",(SELECT `temptable`.`value` FROM (SELECT * FROM `t1` WHERE `name`="consoleproxy.url.domain") AS `temptable` WHERE `temptable`.`name`="consoleproxy.url.domain")) WHERE `name`="consoleproxy.url.domain";
+drop table t1;
+CREATE TABLE `t1` (
+`name` varchar(255) NOT NULL,
+`value` varchar(4095) DEFAULT NULL,
+PRIMARY KEY (`name`)
+);
+create table t2 (
+`name` varchar(255) NOT NULL,
+`value` varchar(4095) DEFAULT NULL,
+PRIMARY KEY (`name`)
+);
+UPDATE t1
+SET value = (SELECT value FROM t2 WHERE `name`= t1.name) 
+WHERE value is null ;
+drop table t1,t2;
+#
+#MDEV-8701: Crash on derived query
+#
+CREATE TABLE t1 (
+data_exit_entry_id int(11) NOT NULL,
+data_entry_id int(11) NOT NULL,
+data_entry_exit_id int(11) NOT NULL,
+data_exit_entry_quantity double NOT NULL
+) DEFAULT CHARSET=utf8;
+CREATE TABLE t2 (
+data_entry_id int(11) NOT NULL,
+data_entry_cost double NOT NULL,
+data_entry_quantity double NOT NULL
+) DEFAULT CHARSET=utf8;
+create  algorithm=temptable view v1 as SELECT data_entry_exit_id, data_exit_entry_quantity, data_entry_cost 
+FROM t1 INNER JOIN t2 as dt ON dt.data_entry_id = t1.data_entry_id;
+UPDATE t2 
+SET data_entry_cost
+= ( ( SELECT SUM(data_exit_entry_quantity * data_entry_cost)
+FROM 
+v1 AS query 
+WHERE data_entry_exit_id = t2.data_entry_id
+)
+);
+UPDATE t2 
+SET data_entry_cost
+= ( ( SELECT SUM(data_exit_entry_quantity * data_entry_cost)
+FROM 
+( SELECT data_entry_exit_id, data_exit_entry_quantity, data_entry_cost 
+FROM t1 INNER JOIN t2 as dt ON dt.data_entry_id = t1.data_entry_id) AS query 
+WHERE data_entry_exit_id = t2.data_entry_id
+)
+);
+drop view v1;
+drop table t1, t2;
+#
 # MDEV-4410: update does not want to use a covering index, but select uses it.
 #
 create table t2(a int);
@@ -625,6 +709,7 @@ Handler_read_key	1
 Handler_read_last	0
 Handler_read_next	1
 Handler_read_prev	0
+Handler_read_retry	0
 Handler_read_rnd	2
 Handler_read_rnd_deleted	0
 Handler_read_rnd_next	0

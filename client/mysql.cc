@@ -1,7 +1,6 @@
 /*
    Copyright (c) 2000, 2014, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2013, Monty Program Ab.
-   Copyright (c) 2013, 2014, SkySQL Ab
+   Copyright (c) 2009, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -96,9 +95,16 @@ extern "C" {
 #endif
 }
 
-#if !defined(HAVE_VIDATTR)
-#undef vidattr
-#define vidattr(A) {}			// Can't get this to work
+#ifdef HAVE_VIDATTR
+static int have_curses= 0;
+static void my_vidattr(chtype attrs)
+{
+  if (have_curses)
+    vidattr(attrs);
+}
+#else
+#undef HAVE_SETUPTERM
+#define my_vidattr(A) {}              // Can't get this to work
 #endif
 
 #ifdef FN_NO_CASE_SENSE
@@ -239,7 +245,8 @@ static void end_pager();
 static void init_tee(const char *);
 static void end_tee();
 static const char* construct_prompt();
-static char *get_arg(char *line, my_bool get_next_arg);
+enum get_arg_mode { CHECK, GET, GET_NEXT};
+static char *get_arg(char *line, get_arg_mode mode);
 static void init_username();
 static void add_int_to_prompt(int toadd);
 static int get_result_width(MYSQL_RES *res);
@@ -1108,7 +1115,7 @@ inline int get_command_index(char cmd_char)
     All client-specific commands are in the first part of commands array
     and have a function to implement it.
   */
-  for (uint i= 0; *commands[i].func; i++)
+  for (uint i= 0; commands[i].func; i++)
     if (commands[i].cmd_char == cmd_char)
       return i;
   return -1;
@@ -1346,6 +1353,44 @@ sig_handler mysql_end(int sig)
   exit(status.exit_status);
 }
 
+/*
+  set connection-specific options and call mysql_real_connect
+*/
+static bool do_connect(MYSQL *mysql, const char *host, const char *user,
+                       const char *password, const char *database, ulong flags)
+{
+  if (opt_secure_auth)
+    mysql_options(mysql, MYSQL_SECURE_AUTH, (char *) &opt_secure_auth);
+#if defined(HAVE_OPENSSL) && !defined(EMBEDDED_LIBRARY)
+  if (opt_use_ssl)
+  {
+    mysql_ssl_set(mysql, opt_ssl_key, opt_ssl_cert, opt_ssl_ca,
+		  opt_ssl_capath, opt_ssl_cipher);
+    mysql_options(mysql, MYSQL_OPT_SSL_CRL, opt_ssl_crl);
+    mysql_options(mysql, MYSQL_OPT_SSL_CRLPATH, opt_ssl_crlpath);
+  }
+  mysql_options(mysql,MYSQL_OPT_SSL_VERIFY_SERVER_CERT,
+                (char*)&opt_ssl_verify_server_cert);
+#endif
+  if (opt_protocol)
+    mysql_options(mysql,MYSQL_OPT_PROTOCOL,(char*)&opt_protocol);
+#ifdef HAVE_SMEM
+  if (shared_memory_base_name)
+    mysql_options(mysql,MYSQL_SHARED_MEMORY_BASE_NAME,shared_memory_base_name);
+#endif
+  if (opt_plugin_dir && *opt_plugin_dir)
+    mysql_options(mysql, MYSQL_PLUGIN_DIR, opt_plugin_dir);
+
+  if (opt_default_auth && *opt_default_auth)
+    mysql_options(mysql, MYSQL_DEFAULT_AUTH, opt_default_auth);
+
+  mysql_options(mysql, MYSQL_OPT_CONNECT_ATTR_RESET, 0);
+  mysql_options4(mysql, MYSQL_OPT_CONNECT_ATTR_ADD,
+                 "program_name", "mysql");
+  return mysql_real_connect(mysql, host, user, password, database,
+                            opt_mysql_port, opt_mysql_unix_port, flags);
+}
+
 
 /*
   This function handles sigint calls
@@ -1367,11 +1412,7 @@ sig_handler handle_sigint(int sig)
   }
 
   kill_mysql= mysql_init(kill_mysql);
-  mysql_options(kill_mysql, MYSQL_OPT_CONNECT_ATTR_RESET, 0);
-  mysql_options4(kill_mysql, MYSQL_OPT_CONNECT_ATTR_ADD,
-                 "program_name", "mysql");
-  if (!mysql_real_connect(kill_mysql,current_host, current_user, opt_password,
-                          "", opt_mysql_port, opt_mysql_unix_port,0))
+  if (!do_connect(kill_mysql,current_host, current_user, opt_password, "", 0))
   {
     tee_fprintf(stdout, "Ctrl-C -- sorry, cannot connect to server to kill query, giving up ...\n");
     goto err;
@@ -2217,7 +2258,7 @@ static COMMANDS *find_command(char *name)
       if (!my_strnncoll(&my_charset_latin1, (uchar*) name, len,
                         (uchar*) commands[i].name, len) &&
           (commands[i].name[len] == '\0') &&
-          (!end || commands[i].takes_params))
+          (!end || (commands[i].takes_params && get_arg(name, CHECK))))
       {
         index= i;
         break;
@@ -3137,7 +3178,7 @@ com_charset(String *buffer __attribute__((unused)), char *line)
   char buff[256], *param;
   CHARSET_INFO * new_cs;
   strmake_buf(buff, line);
-  param= get_arg(buff, 0);
+  param= get_arg(buff, GET);
   if (!param || !*param)
   {
     return put_info("Usage: \\C charset_name | charset charset_name", 
@@ -3324,7 +3365,7 @@ com_go(String *buffer,char *line __attribute__((unused)))
 
 end:
 
- /* Show warnings if any or error occured */
+ /* Show warnings if any or error occurred */
   if (show_warnings == 1 && (warnings >= 1 || error))
     print_warnings();
 
@@ -4223,12 +4264,12 @@ com_connect(String *buffer, char *line)
 #ifdef EXTRA_DEBUG
     tmp[1]= 0;
 #endif
-    tmp= get_arg(buff, 0);
+    tmp= get_arg(buff, GET);
     if (tmp && *tmp)
     {
       my_free(current_db);
       current_db= my_strdup(tmp, MYF(MY_WME));
-      tmp= get_arg(buff, 1);
+      tmp= get_arg(buff, GET_NEXT);
       if (tmp)
       {
 	my_free(current_host);
@@ -4331,7 +4372,7 @@ com_delimiter(String *buffer __attribute__((unused)), char *line)
   char buff[256], *tmp;
 
   strmake_buf(buff, line);
-  tmp= get_arg(buff, 0);
+  tmp= get_arg(buff, GET);
 
   if (!tmp || !*tmp)
   {
@@ -4362,7 +4403,7 @@ com_use(String *buffer __attribute__((unused)), char *line)
 
   bzero(buff, sizeof(buff));
   strmake_buf(buff, line);
-  tmp= get_arg(buff, 0);
+  tmp= get_arg(buff, GET);
   if (!tmp || !*tmp)
   {
     put_info("USE must be followed by a database name", INFO_ERROR);
@@ -4447,23 +4488,22 @@ com_nowarnings(String *buffer __attribute__((unused)),
 }
 
 /*
-  Gets argument from a command on the command line. If get_next_arg is
-  not defined, skips the command and returns the first argument. The
-  line is modified by adding zero to the end of the argument. If
-  get_next_arg is defined, then the function searches for end of string
-  first, after found, returns the next argument and adds zero to the
-  end. If you ever wish to use this feature, remember to initialize all
-  items in the array to zero first.
+  Gets argument from a command on the command line. If mode is not GET_NEXT,
+  skips the command and returns the first argument. The line is modified by
+  adding zero to the end of the argument. If mode is GET_NEXT, then the
+  function searches for end of string first, after found, returns the next
+  argument and adds zero to the end. If you ever wish to use this feature,
+  remember to initialize all items in the array to zero first.
 */
 
-char *get_arg(char *line, my_bool get_next_arg)
+static char *get_arg(char *line, get_arg_mode mode)
 {
   char *ptr, *start;
-  my_bool quoted= 0, valid_arg= 0;
+  bool short_cmd= false;
   char qtype= 0;
 
   ptr= line;
-  if (get_next_arg)
+  if (mode == GET_NEXT)
   {
     for (; *ptr; ptr++) ;
     if (*(ptr + 1))
@@ -4474,7 +4514,7 @@ char *get_arg(char *line, my_bool get_next_arg)
     /* skip leading white spaces */
     while (my_isspace(charset_info, *ptr))
       ptr++;
-    if (*ptr == '\\') // short command was used
+    if ((short_cmd= *ptr == '\\')) // short command was used
       ptr+= 2;
     else
       while (*ptr &&!my_isspace(charset_info, *ptr)) // skip command
@@ -4487,24 +4527,28 @@ char *get_arg(char *line, my_bool get_next_arg)
   if (*ptr == '\'' || *ptr == '\"' || *ptr == '`')
   {
     qtype= *ptr;
-    quoted= 1;
     ptr++;
   }
   for (start=ptr ; *ptr; ptr++)
   {
-    if (*ptr == '\\' && ptr[1]) // escaped character
+    if ((*ptr == '\\' && ptr[1]) ||  // escaped character
+        (!short_cmd && qtype && *ptr == qtype && ptr[1] == qtype)) // quote
     {
-      // Remove the backslash
-      strmov_overlapp(ptr, ptr+1);
+      // Remove (or skip) the backslash (or a second quote)
+      if (mode != CHECK)
+        strmov_overlapp(ptr, ptr+1);
+      else
+        ptr++;
     }
-    else if ((!quoted && *ptr == ' ') || (quoted && *ptr == qtype))
+    else if (*ptr == (qtype ? qtype : ' '))
     {
-      *ptr= 0;
+      qtype= 0;
+      if (mode != CHECK)
+        *ptr= 0;
       break;
     }
   }
-  valid_arg= ptr != start;
-  return valid_arg ? start : NullS;
+  return ptr != start && !qtype ? start : NullS;
 }
 
 
@@ -4580,27 +4624,8 @@ sql_real_connect(char *host,char *database,char *user,char *password,
   }
   if (opt_compress)
     mysql_options(&mysql,MYSQL_OPT_COMPRESS,NullS);
-  if (opt_secure_auth)
-    mysql_options(&mysql, MYSQL_SECURE_AUTH, (char *) &opt_secure_auth);
   if (using_opt_local_infile)
     mysql_options(&mysql,MYSQL_OPT_LOCAL_INFILE, (char*) &opt_local_infile);
-#if defined(HAVE_OPENSSL) && !defined(EMBEDDED_LIBRARY)
-  if (opt_use_ssl)
-  {
-    mysql_ssl_set(&mysql, opt_ssl_key, opt_ssl_cert, opt_ssl_ca,
-		  opt_ssl_capath, opt_ssl_cipher);
-    mysql_options(&mysql, MYSQL_OPT_SSL_CRL, opt_ssl_crl);
-    mysql_options(&mysql, MYSQL_OPT_SSL_CRLPATH, opt_ssl_crlpath);
-  }
-  mysql_options(&mysql,MYSQL_OPT_SSL_VERIFY_SERVER_CERT,
-                (char*)&opt_ssl_verify_server_cert);
-#endif
-  if (opt_protocol)
-    mysql_options(&mysql,MYSQL_OPT_PROTOCOL,(char*)&opt_protocol);
-#ifdef HAVE_SMEM
-  if (shared_memory_base_name)
-    mysql_options(&mysql,MYSQL_SHARED_MEMORY_BASE_NAME,shared_memory_base_name);
-#endif
   if (safe_updates)
   {
     char init_command[100];
@@ -4612,18 +4637,8 @@ sql_real_connect(char *host,char *database,char *user,char *password,
 
   mysql_options(&mysql, MYSQL_SET_CHARSET_NAME, default_charset);
 
-  if (opt_plugin_dir && *opt_plugin_dir)
-    mysql_options(&mysql, MYSQL_PLUGIN_DIR, opt_plugin_dir);
-
-  if (opt_default_auth && *opt_default_auth)
-    mysql_options(&mysql, MYSQL_DEFAULT_AUTH, opt_default_auth);
-
-  mysql_options(&mysql, MYSQL_OPT_CONNECT_ATTR_RESET, 0);
-  mysql_options4(&mysql, MYSQL_OPT_CONNECT_ATTR_ADD,
-                 "program_name", "mysql");
-  if (!mysql_real_connect(&mysql, host, user, password,
-                          database, opt_mysql_port, opt_mysql_unix_port,
-                          connect_flag | CLIENT_MULTI_STATEMENTS))
+  if (!do_connect(&mysql, host, user, password, database,
+                  connect_flag | CLIENT_MULTI_STATEMENTS))
   {
     if (!silent ||
 	(mysql_errno(&mysql) != CR_CONN_HOST_ERROR &&
@@ -4735,9 +4750,9 @@ com_status(String *buffer __attribute__((unused)),
 
   if (skip_updates)
   {
-    vidattr(A_BOLD);
+    my_vidattr(A_BOLD);
     tee_fprintf(stdout, "\nAll updates ignored to this database\n");
-    vidattr(A_NORMAL);
+    my_vidattr(A_NORMAL);
   }
 #ifdef USE_POPEN
   tee_fprintf(stdout, "Current pager:\t\t%s\n", pager);
@@ -4805,9 +4820,9 @@ com_status(String *buffer __attribute__((unused)),
   }
   if (safe_updates)
   {
-    vidattr(A_BOLD);
+    my_vidattr(A_BOLD);
     tee_fprintf(stdout, "\nNote that you are running in safe_update_mode:\n");
-    vidattr(A_NORMAL);
+    my_vidattr(A_NORMAL);
     tee_fprintf(stdout, "\
 UPDATEs and DELETEs that don't use a key in the WHERE clause are not allowed.\n\
 (One can force an UPDATE/DELETE by adding LIMIT # at the end of the command.)\n\
@@ -4900,10 +4915,11 @@ put_info(const char *str,INFO_TYPE info_type, uint error, const char *sqlstate)
   {
     if (!inited)
     {
-      inited=1;
 #ifdef HAVE_SETUPTERM
-      (void) setupterm((char *)0, 1, (int *) 0);
+      int errret;
+      have_curses= setupterm((char *)0, 1, &errret) != ERR;
 #endif
+      inited=1;
     }
     if (info_type == INFO_ERROR)
     {
@@ -4915,7 +4931,7 @@ put_info(const char *str,INFO_TYPE info_type, uint error, const char *sqlstate)
         putchar('\a');		      	/* This should make a bell */
 #endif
       }
-      vidattr(A_STANDOUT);
+      my_vidattr(A_STANDOUT);
       if (error)
       {
 	if (sqlstate)
@@ -4934,9 +4950,9 @@ put_info(const char *str,INFO_TYPE info_type, uint error, const char *sqlstate)
       tee_fputs(": ", file);
     }
     else
-      vidattr(A_BOLD);
+      my_vidattr(A_BOLD);
     (void) tee_puts(str, file);
-    vidattr(A_NORMAL);
+    my_vidattr(A_NORMAL);
   }
   if (unbuffered)
     fflush(file);

@@ -265,7 +265,7 @@ again:
     {
       if (mysql_errno(&sd->mysql))
       {
-        /* An error occured. */
+        /* An error occurred. */
         printf("%d | Error: %s\n", sd->index, mysql_error(&sd->mysql));
       }
       else
@@ -425,7 +425,7 @@ main(int argc, char *argv[])
 
   event_dispatch();
 
-  free(sds);
+  my_free(sds);
 
   mysql_library_end();
 

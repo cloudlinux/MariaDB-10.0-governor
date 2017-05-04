@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2014, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1994, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2008, Google Inc.
 Copyright (c) 2012, Facebook Inc.
 
@@ -1085,7 +1085,7 @@ This has to be done either within the same mini-transaction,
 or by invoking ibuf_reset_free_bits() before mtr_commit().
 
 @return	pointer to inserted record if succeed, else NULL */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 rec_t*
 btr_cur_insert_if_possible(
 /*=======================*/
@@ -1128,7 +1128,7 @@ btr_cur_insert_if_possible(
 /*************************************************************//**
 For an insert, checks the locks and does the undo logging if desired.
 @return	DB_SUCCESS, DB_WAIT_LOCK, DB_FAIL, or error number */
-UNIV_INLINE __attribute__((warn_unused_result, nonnull(2,3,5,6)))
+UNIV_INLINE MY_ATTRIBUTE((warn_unused_result, nonnull(2,3,5,6)))
 dberr_t
 btr_cur_ins_lock_and_undo(
 /*======================*/
@@ -1605,6 +1605,10 @@ btr_cur_pessimistic_insert(
 			flags, cursor, offsets, heap, entry, n_ext, mtr);
 	}
 
+	if (*rec == NULL && os_has_said_disk_full) {
+		return(DB_OUT_OF_FILE_SPACE);
+	}
+
 	ut_ad(page_rec_get_next(btr_cur_get_rec(cursor)) == *rec);
 
 	if (!(flags & BTR_NO_LOCKING_FLAG)) {
@@ -1650,7 +1654,7 @@ btr_cur_pessimistic_insert(
 /*************************************************************//**
 For an update, checks the locks and does the undo logging.
 @return	DB_SUCCESS, DB_WAIT_LOCK, or error number */
-UNIV_INLINE __attribute__((warn_unused_result, nonnull(2,3,6,7)))
+UNIV_INLINE MY_ATTRIBUTE((warn_unused_result, nonnull(2,3,6,7)))
 dberr_t
 btr_cur_upd_lock_and_undo(
 /*======================*/
@@ -1669,7 +1673,7 @@ btr_cur_upd_lock_and_undo(
 	const rec_t*	rec;
 	dberr_t		err;
 
-	ut_ad(thr || (flags & BTR_NO_LOCKING_FLAG));
+	ut_ad((thr != NULL) || (flags & BTR_NO_LOCKING_FLAG));
 
 	rec = btr_cur_get_rec(cursor);
 	index = cursor->index;
@@ -1876,7 +1880,6 @@ btr_cur_update_alloc_zip_func(
 	const page_t*	page = page_cur_get_page(cursor);
 
 	ut_ad(page_zip == page_cur_get_page_zip(cursor));
-	ut_ad(page_zip);
 	ut_ad(!dict_index_is_ibuf(index));
 	ut_ad(rec_offs_validate(page_cur_get_rec(cursor), index, offsets));
 
@@ -2118,6 +2121,7 @@ btr_cur_optimistic_update(
 	ulint		max_size;
 	ulint		new_rec_size;
 	ulint		old_rec_size;
+	ulint		max_ins_size = 0;
 	dtuple_t*	new_entry;
 	roll_ptr_t	roll_ptr;
 	ulint		i;
@@ -2246,6 +2250,10 @@ any_extern:
 		: (old_rec_size
 		   + page_get_max_insert_size_after_reorganize(page, 1));
 
+	if (!page_zip) {
+		max_ins_size = page_get_max_insert_size_after_reorganize(page, 1);
+	}
+
 	if (!(((max_size >= BTR_CUR_PAGE_REORGANIZE_LIMIT)
 	       && (max_size >= new_rec_size))
 	      || (page_get_n_recs(page) <= 1))) {
@@ -2305,12 +2313,15 @@ any_extern:
 	ut_ad(err == DB_SUCCESS);
 
 func_exit:
-	if (page_zip
-	    && !(flags & BTR_KEEP_IBUF_BITMAP)
+	if (!(flags & BTR_KEEP_IBUF_BITMAP)
 	    && !dict_index_is_clust(index)
 	    && page_is_leaf(page)) {
-		/* Update the free bits in the insert buffer. */
-		ibuf_update_free_bits_zip(block, mtr);
+
+		if (page_zip) {
+			ibuf_update_free_bits_zip(block, mtr);
+		} else {
+			ibuf_update_free_bits_low(block, max_ins_size, mtr);
+		}
 	}
 
 	return(err);
@@ -2445,6 +2456,7 @@ btr_cur_pessimistic_update(
 	ibool		was_first;
 	ulint		n_reserved	= 0;
 	ulint		n_ext;
+	ulint		max_ins_size	= 0;
 
 	*offsets = NULL;
 	*big_rec = NULL;
@@ -2623,6 +2635,10 @@ make_external:
 		}
 	}
 
+	if (!page_zip) {
+		max_ins_size = page_get_max_insert_size_after_reorganize(page, 1);
+	}
+
 	/* Store state of explicit locks on rec on the page infimum record,
 	before deleting rec. The page infimum acts as a dummy carrier of the
 	locks, taking care also of lock releases, before we can move the locks
@@ -2668,13 +2684,18 @@ make_external:
 				rec_offs_make_valid(
 					page_cursor->rec, index, *offsets);
 			}
-		} else if (page_zip &&
-			   !dict_index_is_clust(index)
+		} else if (!dict_index_is_clust(index)
 			   && page_is_leaf(page)) {
+
 			/* Update the free bits in the insert buffer.
 			This is the same block which was skipped by
 			BTR_KEEP_IBUF_BITMAP. */
-			ibuf_update_free_bits_zip(block, mtr);
+			if (page_zip) {
+				ibuf_update_free_bits_zip(block, mtr);
+			} else {
+				ibuf_update_free_bits_low(block, max_ins_size,
+							  mtr);
+			}
 		}
 
 		err = DB_SUCCESS;
@@ -2940,7 +2961,7 @@ btr_cur_del_mark_set_clust_rec(
 	ut_ad(page_is_leaf(page_align(rec)));
 
 #ifdef UNIV_DEBUG
-	if (btr_cur_print_record_ops && thr) {
+	if (btr_cur_print_record_ops) {
 		btr_cur_trx_report(thr_get_trx(thr)->id, index, "del mark ");
 		rec_print_new(stderr, rec, offsets);
 	}
@@ -3088,7 +3109,7 @@ btr_cur_del_mark_set_sec_rec(
 	rec = btr_cur_get_rec(cursor);
 
 #ifdef UNIV_DEBUG
-	if (btr_cur_print_record_ops && thr) {
+	if (btr_cur_print_record_ops && (thr != NULL)) {
 		btr_cur_trx_report(thr_get_trx(thr)->id, cursor->index,
 				   "del mark ");
 		rec_print(stderr, rec, cursor->index);
@@ -4256,7 +4277,6 @@ btr_cur_disown_inherited_fields(
 	ut_ad(rec_offs_validate(rec, index, offsets));
 	ut_ad(!rec_offs_comp(offsets) || !rec_get_node_ptr_flag(rec));
 	ut_ad(rec_offs_any_extern(offsets));
-	ut_ad(mtr);
 
 	for (i = 0; i < rec_offs_n_fields(offsets); i++) {
 		if (rec_offs_nth_extern(offsets, i)
@@ -4318,9 +4338,6 @@ btr_push_update_extern_fields(
 	ulint			n_pushed	= 0;
 	ulint			n;
 	const upd_field_t*	uf;
-
-	ut_ad(tuple);
-	ut_ad(update);
 
 	uf = update->fields;
 	n = upd_get_n_fields(update);
@@ -4493,7 +4510,6 @@ btr_store_big_rec_extern_fields(
 
 	ut_ad(rec_offs_validate(rec, index, offsets));
 	ut_ad(rec_offs_any_extern(offsets));
-	ut_ad(btr_mtr);
 	ut_ad(mtr_memo_contains(btr_mtr, dict_index_get_lock(index),
 				MTR_MEMO_X_LOCK));
 	ut_ad(mtr_memo_contains(btr_mtr, rec_block, MTR_MEMO_PAGE_X_FIX));
@@ -5021,7 +5037,7 @@ btr_free_externally_stored_field(
 	ulint		i,		/*!< in: field number of field_ref;
 					ignored if rec == NULL */
 	enum trx_rb_ctx	rb_ctx,		/*!< in: rollback context */
-	mtr_t*		local_mtr __attribute__((unused))) /*!< in: mtr
+	mtr_t*		local_mtr MY_ATTRIBUTE((unused))) /*!< in: mtr
 					containing the latch to data an an
 					X-latch to the index tree */
 {

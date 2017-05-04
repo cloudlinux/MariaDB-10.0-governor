@@ -1,5 +1,5 @@
-/* Copyright (c) 2000, 2014, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2014, Monty Program Ab.
+/* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
+   Copyright (c) 2008, 2015, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -876,8 +876,8 @@ public:
     Used to store 'current key tuples', in both range analysis and
     partitioning (list) analysis
   */
-  uchar min_key[MAX_KEY_LENGTH+MAX_FIELD_WIDTH],
-    max_key[MAX_KEY_LENGTH+MAX_FIELD_WIDTH];
+  uchar *min_key;
+  uchar *max_key;
 
   /* Number of SEL_ARG objects allocated by SEL_ARG::clone_tree operations */
   uint alloced_sel_args; 
@@ -3015,8 +3015,6 @@ int SQL_SELECT::test_quick_select(THD *thd, key_map keys_to_use,
     scan_time= read_time= DBL_MAX;
   if (limit < records)
     read_time= (double) records + scan_time + 1; // Force to use index
-  else if (read_time <= 2.0 && !force_quick_range)
-    DBUG_RETURN(0);				/* No need for quick select */
   
   possible_keys.clear_all();
 
@@ -3066,13 +3064,13 @@ int SQL_SELECT::test_quick_select(THD *thd, key_map keys_to_use,
       DBUG_RETURN(0);				// Can't use range
     }
     key_parts= param.key_parts;
-    thd->mem_root= &alloc;
 
     /*
       Make an array with description of all key parts of all table keys.
       This is used in get_mm_parts function.
     */
     key_info= head->key_info;
+    uint max_key_len= 0;
     for (idx=0 ; idx < head->s->keys ; idx++, key_info++)
     {
       KEY_PART_INFO *key_part_info;
@@ -3085,6 +3083,7 @@ int SQL_SELECT::test_quick_select(THD *thd, key_map keys_to_use,
 
       param.key[param.keys]=key_parts;
       key_part_info= key_info->key_part;
+      uint cur_key_len= 0;
       for (uint part= 0 ; part < n_key_parts ; 
            part++, key_parts++, key_part_info++)
      {
@@ -3092,6 +3091,7 @@ int SQL_SELECT::test_quick_select(THD *thd, key_map keys_to_use,
 	key_parts->part=	 part;
 	key_parts->length=       key_part_info->length;
 	key_parts->store_length= key_part_info->store_length;
+        cur_key_len += key_part_info->store_length;
 	key_parts->field=	 key_part_info->field;
 	key_parts->null_bit=	 key_part_info->null_bit;
         key_parts->image_type =
@@ -3100,10 +3100,22 @@ int SQL_SELECT::test_quick_select(THD *thd, key_map keys_to_use,
         key_parts->flag=         (uint8) key_part_info->key_part_flag;
       }
       param.real_keynr[param.keys++]=idx;
+      if (cur_key_len > max_key_len)
+        max_key_len= cur_key_len;
     }
     param.key_parts_end=key_parts;
     param.alloced_sel_args= 0;
 
+    max_key_len++; /* Take into account the "+1" in QUICK_RANGE::QUICK_RANGE */
+    if (!(param.min_key= (uchar*)alloc_root(&alloc,max_key_len)) ||
+        !(param.max_key= (uchar*)alloc_root(&alloc,max_key_len)))
+    {
+      thd->no_errors=0;
+      free_root(&alloc,MYF(0));			// Return memory & allocator
+      DBUG_RETURN(0);				// Can't use range
+    }
+
+    thd->mem_root= &alloc;
     /* Calculate cost of full index read for the shortest covering index */
     if (!head->covering_keys.is_clear_all())
     {
@@ -3271,7 +3283,6 @@ int SQL_SELECT::test_quick_select(THD *thd, key_map keys_to_use,
     thd->no_errors=0;
   }
 
-
   DBUG_EXECUTE("info", print_quick(quick, &needed_reg););
 
   /*
@@ -3327,21 +3338,30 @@ bool create_key_parts_for_pseudo_indexes(RANGE_OPT_PARAM *param,
     return TRUE;
 
   param->key_parts= key_part;
-
+  uint max_key_len= 0;
   for (field_ptr= table->field; *field_ptr; field_ptr++)
   {
     if (bitmap_is_set(used_fields, (*field_ptr)->field_index))
     {
       Field *field= *field_ptr;
       uint16 store_length;
+      uint16 max_key_part_length= (uint16) table->file->max_key_part_length();
       key_part->key= keys;
       key_part->part= 0;
-      key_part->length= (uint16) field->key_length();
+      if (field->flags & BLOB_FLAG)
+        key_part->length= max_key_part_length;
+      else
+      {
+        key_part->length= (uint16) field->key_length();
+        set_if_smaller(key_part->length, max_key_part_length);
+      }
       store_length= key_part->length;
       if (field->real_maybe_null())
         store_length+= HA_KEY_NULL_LENGTH;
       if (field->real_type() == MYSQL_TYPE_VARCHAR)
         store_length+= HA_KEY_BLOB_LENGTH;
+      if (max_key_len < store_length)
+        max_key_len= store_length;
       key_part->store_length= store_length; 
       key_part->field= field; 
       key_part->image_type= Field::itRAW;
@@ -3350,6 +3370,13 @@ bool create_key_parts_for_pseudo_indexes(RANGE_OPT_PARAM *param,
       keys++;
       key_part++;
     }
+  }
+
+  max_key_len++; /* Take into account the "+1" in QUICK_RANGE::QUICK_RANGE */
+  if (!(param->min_key= (uchar*)alloc_root(param->mem_root, max_key_len)) ||
+      !(param->max_key= (uchar*)alloc_root(param->mem_root, max_key_len)))
+  {
+    return true;
   }
   param->keys= keys;
   param->key_parts_end= key_part;
@@ -3534,9 +3561,9 @@ bool calculate_cond_selectivity_for_table(THD *thd, TABLE *table, Item *cond)
 	    break; 
           bitmap_set_bit(&handled_columns, key_part->fieldnr-1);
         }
-        double selectivity_mult;
         if (i)
         {
+          double UNINIT_VAR(selectivity_mult);
           /* 
             There is at least 1-column prefix of columns whose selectivity has
             not yet been accounted for.
@@ -4611,10 +4638,19 @@ int find_used_partitions(PART_PRUNE_PARAM *ppar, SEL_ARG *key_tree)
                                          key_tree->min_flag |
                                            key_tree->max_flag,
                                          &subpart_iter);
-      DBUG_ASSERT(res); /* We can't get "no satisfying subpartitions" */
+      if (res == 0)
+      {
+        /*
+           The only case where we can get "no satisfying subpartitions"
+           returned from the above call is when an error has occurred.
+        */
+        DBUG_ASSERT(range_par->thd->is_error());
+        return 0;
+      }
+
       if (res == -1)
         goto pop_and_go_right; /* all subpartitions satisfy */
-        
+
       uint32 subpart_id;
       bitmap_clear_all(&ppar->subparts_bitmap);
       while ((subpart_id= subpart_iter.get_next(&subpart_iter)) !=
@@ -4899,12 +4935,14 @@ static bool create_partition_index_description(PART_PRUNE_PARAM *ppar)
   Field **field= (ppar->part_fields)? part_info->part_field_array :
                                            part_info->subpart_field_array;
   bool in_subpart_fields= FALSE;
+  uint total_key_len= 0;
   for (uint part= 0; part < total_parts; part++, key_part++)
   {
     key_part->key=          0;
     key_part->part=	    part;
     key_part->length= (uint16)(*field)->key_length();
     key_part->store_length= (uint16)get_partition_field_store_length(*field);
+    total_key_len += key_part->store_length;
 
     DBUG_PRINT("info", ("part %u length %u store_length %u", part,
                          key_part->length, key_part->store_length));
@@ -4933,6 +4971,13 @@ static bool create_partition_index_description(PART_PRUNE_PARAM *ppar)
     }
   }
   range_par->key_parts_end= key_part;
+
+  total_key_len++; /* Take into account the "+1" in QUICK_RANGE::QUICK_RANGE */
+  if (!(range_par->min_key= (uchar*)alloc_root(alloc,total_key_len)) ||
+      !(range_par->max_key= (uchar*)alloc_root(alloc,total_key_len)))
+  {
+    return true;
+  }
 
   DBUG_EXECUTE("info", print_partitioning_index(range_par->key_parts,
                                                 range_par->key_parts_end););
@@ -7689,7 +7734,7 @@ static SEL_TREE *get_func_mm_tree(RANGE_OPT_PARAM *param, Item_func *cond_func,
           break;
         }
         SEL_TREE *tree2;
-        for (; i < func->array->count; i++)
+        for (; i < func->array->used_count; i++)
         {
           if (func->array->compare_elems(i, i-1))
           {
@@ -8022,8 +8067,15 @@ static SEL_TREE *get_mm_tree(RANGE_OPT_PARAM *param,COND *cond)
   if (cond_func->functype() == Item_func::BETWEEN ||
       cond_func->functype() == Item_func::IN_FUNC)
     inv= ((Item_func_opt_neg *) cond_func)->negated;
-  else if (cond_func->select_optimize() == Item_func::OPTIMIZE_NONE)
-    DBUG_RETURN(0);			       
+  else
+  {
+    MEM_ROOT *tmp_root= param->mem_root;
+    param->thd->mem_root= param->old_root;
+    Item_func::optimize_type opt_res= cond_func->select_optimize();
+    param->thd->mem_root= tmp_root;
+    if (opt_res == Item_func::OPTIMIZE_NONE)
+      DBUG_RETURN(0);
+  }
 
   param->cond= cond;
 
@@ -9878,6 +9930,13 @@ key_or(RANGE_OPT_PARAM *param, SEL_ARG *key1,SEL_ARG *key2)
 
       if (!tmp->next_key_part)
       {
+        if (key2->use_count)
+	{
+	  SEL_ARG *key2_cpy= new SEL_ARG(*key2);
+          if (key2_cpy)
+            return 0;
+          key2= key2_cpy;
+	}
         /*
           tmp->next_key_part is empty: cut the range that is covered
           by tmp from key2. 
@@ -9909,13 +9968,6 @@ key_or(RANGE_OPT_PARAM *param, SEL_ARG *key1,SEL_ARG *key2)
             key2:               [---]
             tmp:     [---------]
           */
-          if (key2->use_count)
-	  {
-	    SEL_ARG *key2_cpy= new SEL_ARG(*key2);
-            if (key2_cpy)
-              return 0;
-            key2= key2_cpy;
-	  }
           key2->copy_max_to_min(tmp);
           continue;
         }
@@ -10958,8 +11010,10 @@ get_quick_keys(PARAM *param,QUICK_RANGE_SELECT *quick,KEY_PART *key,
       KEY *table_key=quick->head->key_info+quick->index;
       flag=EQ_RANGE;
       if ((table_key->flags & HA_NOSAME) &&
+          min_part == key_tree->part &&
           key_tree->part == table_key->user_defined_key_parts-1)
       {
+        DBUG_ASSERT(min_part == max_part);
         if ((table_key->flags & HA_NULL_PART_KEY) &&
             null_part_in_key(key,
                              param->min_key,

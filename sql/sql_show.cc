@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2015, MariaDB
+   Copyright (c) 2009, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -367,81 +367,6 @@ int fill_all_plugins(THD *thd, TABLE_LIST *tables, COND *cond)
   DBUG_RETURN(0);
 }
 
-bool mysqld_show_lvemem(THD *thd)
-{
-  List<Item> field_list;
-  Protocol *protocol= thd->protocol;
-  char mem_buffer[64] = {0};
-  DBUG_ENTER("mysqld_show_lvemem");
-  snprintf(mem_buffer, 63, "%ld", get_memusage_lvedebug_info());
-
-  field_list.push_back(new Item_empty_string("Mem_Usage",300));
-
-  if (protocol->send_result_set_metadata(&field_list,
-                            Protocol::SEND_NUM_ROWS | Protocol::SEND_EOF))
-    DBUG_RETURN(TRUE);
-
-  protocol->prepare_for_resend();
-  protocol->store((const char *)mem_buffer, system_charset_info);
-  if (protocol->write())
-      DBUG_RETURN(TRUE);
-
-  my_eof(thd);
-  DBUG_RETURN(FALSE);
-}
-
-bool mysqld_show_lvelist(THD *thd)
-{
-  List<Item> field_list;
-  Protocol *protocol= thd->protocol;
-  char pid[10] = {0}, is_in_lve[10] = {0}, chk_is_in_lve[10] = {0}, sql[50] = {0}, debug[200] = {0};
-
-  field_list.push_back(new Item_empty_string("PID",10));
-  field_list.push_back(new Item_empty_string("IS_IN_LVE",5));
-  field_list.push_back(new Item_empty_string("CHECK_IS_IN_LVE",5));
-  field_list.push_back(new Item_empty_string("SQL",50));
-  field_list.push_back(new Item_empty_string("DEBUG",200));
-
-  if (protocol->send_result_set_metadata(&field_list,
-                            Protocol::SEND_NUM_ROWS | Protocol::SEND_EOF))
-    DBUG_RETURN(TRUE);
-
-  void *ptr = init_info_retarray_lvedbug_info(1000);
-  if(ptr){
-
-	  int res = send_to_client_debug_data_lvedebug_info(ptr, 1000);
-	  int index = 0;
-	  for (index = 0; index < res; index++)
-	  {
-		  bzero(pid, 10*sizeof(char));
-		  bzero(is_in_lve, 10*sizeof(char));
-		  bzero(chk_is_in_lve, 10*sizeof(char));
-		  bzero(sql, 50*sizeof(char));
-		  bzero(debug, 200*sizeof(char));
-		  protocol->prepare_for_resend();
-		  retinfo_info_retarray_lvedbug_info(pid, 0, ptr, index, 9);
-		  retinfo_info_retarray_lvedbug_info(is_in_lve, 1, ptr, index, 9);
-		  retinfo_info_retarray_lvedbug_info(chk_is_in_lve, 2, ptr, index, 9);
-		  retinfo_info_retarray_lvedbug_info(sql, 3, ptr, index, 49);
-		  retinfo_info_retarray_lvedbug_info(debug, 4, ptr, index, 199);
-
-		  protocol->store((const char *)pid, system_charset_info);
-		  protocol->store((const char *)is_in_lve, system_charset_info);
-		  protocol->store((const char *)chk_is_in_lve, system_charset_info);
-		  protocol->store((const char *)sql, system_charset_info);
-		  protocol->store((const char *)debug, system_charset_info);
-		  if (protocol->write()){
-			  release_info_retarray_lvedbug_info(ptr);
-			  DBUG_RETURN(TRUE);
-		  }
-	  }
-	  release_info_retarray_lvedbug_info(ptr);
-  }
-  my_eof(thd);
-
-  DBUG_RETURN(FALSE);
-}
-
 
 /***************************************************************************
 ** List all Authors.
@@ -795,18 +720,36 @@ ignore_db_dirs_process_additions()
   for (i= 0; i < ignore_db_dirs_array.elements; i++)
   {
     get_dynamic(&ignore_db_dirs_array, (uchar *) &dir, i);
-    if (my_hash_insert(&ignore_db_dirs_hash, (uchar *) dir))
-      return true;
-    ptr= strnmov(ptr, dir->str, dir->length);
-    if (i + 1 < ignore_db_dirs_array.elements)
-      ptr= strmov(ptr, ",");
+    if (my_hash_insert(&ignore_db_dirs_hash, (uchar *)dir))
+    {
+      /* ignore duplicates from the config file */
+      if (my_hash_search(&ignore_db_dirs_hash, (uchar *)dir->str, dir->length))
+      {
+        sql_print_warning("Duplicate ignore-db-dir directory name '%.*s' "
+                          "found in the config file(s). Ignoring the duplicate.",
+                          (int) dir->length, dir->str);
+        my_free(dir);
+        goto continue_loop;
+      }
 
+      return true;
+    }
+    ptr= strnmov(ptr, dir->str, dir->length);
+    *(ptr++)= ',';
+
+continue_loop:
     /*
       Set the transferred array element to NULL to avoid double free
       in case of error.
     */
     dir= NULL;
     set_dynamic(&ignore_db_dirs_array, (uchar *) &dir, i);
+  }
+
+  if (ptr > opt_ignore_db_dirs)
+  {
+    ptr--;
+    DBUG_ASSERT(*ptr == ',');
   }
 
   /* make sure the string is terminated */
@@ -1365,20 +1308,17 @@ static const char *require_quotes(const char *name, uint name_length)
 }
 
 
-/*
-  Quote the given identifier if needed and append it to the target string.
-  If the given identifier is empty, it will be quoted.
+/**
+  Convert and quote the given identifier if needed and append it to the
+  target string. If the given identifier is empty, it will be quoted.
+  @thd                         thread handler
+  @packet                      target string
+  @name                        the identifier to be appended
+  @length                      length of the appending identifier
 
-  SYNOPSIS
-  append_identifier()
-  thd                   thread handler
-  packet                target string
-  name                  the identifier to be appended
-  name_length           length of the appending identifier
-
-  RETURN VALUES
-    true                Error
-    false               Ok
+  @return
+    0             success
+    1             error
 */
 
 bool
@@ -1793,7 +1733,7 @@ int show_create_table(THD *thd, TABLE_LIST *table_list, String *packet,
 	For string types dump collation name only if
 	collation is not primary for the given charset
       */
-      if (!(field->charset()->state & MY_CS_PRIMARY))
+      if (!(field->charset()->state & MY_CS_PRIMARY) && !field->vcol_info)
       {
 	packet->append(STRING_WITH_LEN(" COLLATE "));
 	packet->append(field->charset()->name);
@@ -3520,6 +3460,100 @@ int fill_schema_table_stats(THD *thd, TABLE_LIST *tables, COND *cond)
   DBUG_RETURN(0);
 }
 
+/* Remove all indexes for a given table from global index statistics */
+
+static
+int del_global_index_stats_for_table(THD *thd, uchar* cache_key, uint cache_key_length)
+{
+  int res = 0;
+  DBUG_ENTER("del_global_index_stats_for_table");
+
+  mysql_mutex_lock(&LOCK_global_index_stats);
+
+  for (uint i= 0; i < global_index_stats.records;)
+  {
+    INDEX_STATS *index_stats =
+      (INDEX_STATS*) my_hash_element(&global_index_stats, i);
+
+    /* We search correct db\0table_name\0 string */
+    if (index_stats &&
+	index_stats->index_name_length >= cache_key_length &&
+	!memcmp(index_stats->index, cache_key, cache_key_length))
+    {
+      res= my_hash_delete(&global_index_stats, (uchar*)index_stats);
+      /*
+          In our HASH implementation on deletion one elements
+          is moved into a place where a deleted element was,
+          and the last element is moved into the empty space.
+          Thus we need to re-examine the current element, but
+          we don't have to restart the search from the beginning.
+      */
+    }
+    else
+      i++;
+  }
+
+  mysql_mutex_unlock(&LOCK_global_index_stats);
+  DBUG_RETURN(res);
+}
+
+/* Remove a table from global table statistics */
+
+int del_global_table_stat(THD *thd, LEX_STRING *db, LEX_STRING *table)
+{
+  TABLE_STATS *table_stats;
+  int res = 0;
+  uchar *cache_key;
+  uint cache_key_length;
+  DBUG_ENTER("del_global_table_stat");
+
+  cache_key_length= db->length + 1 + table->length + 1;
+
+  if(!(cache_key= (uchar *)my_malloc(cache_key_length,
+                                     MYF(MY_WME | MY_ZEROFILL))))
+  {
+    /* Out of memory error already given */
+    res = 1;
+    goto end;
+  }
+
+  memcpy(cache_key, db->str, db->length);
+  memcpy(cache_key + db->length + 1, table->str, table->length);
+
+  res= del_global_index_stats_for_table(thd, cache_key, cache_key_length);
+
+  mysql_mutex_lock(&LOCK_global_table_stats);
+
+  if((table_stats= (TABLE_STATS*) my_hash_search(&global_table_stats,
+                                                cache_key,
+                                                cache_key_length)))
+    res= my_hash_delete(&global_table_stats, (uchar*)table_stats);
+
+  my_free(cache_key);
+  mysql_mutex_unlock(&LOCK_global_table_stats);
+
+end:
+  DBUG_RETURN(res);
+}
+
+/* Remove a index from global index statistics */
+
+int del_global_index_stat(THD *thd, TABLE* table, KEY* key_info)
+{
+  INDEX_STATS *index_stats;
+  uint key_length= table->s->table_cache_key.length + key_info->name_length + 1;
+  int res = 0;
+  DBUG_ENTER("del_global_index_stat");
+  mysql_mutex_lock(&LOCK_global_index_stats);
+
+  if((index_stats= (INDEX_STATS*) my_hash_search(&global_index_stats,
+                                                key_info->cache_name,
+                                                key_length)))
+    res= my_hash_delete(&global_index_stats, (uchar*)index_stats);
+
+  mysql_mutex_unlock(&LOCK_global_index_stats);
+  DBUG_RETURN(res);
+}
 
 /* Fill information schema table with index statistics */
 
@@ -3587,7 +3621,10 @@ void calc_sum_of_all_status(STATUS_VAR *to)
 
   /* Add to this status from existing threads */
   while ((tmp= it++))
-    add_to_status(to, &tmp->status_var);
+  {
+    if (!tmp->status_in_global)
+      add_to_status(to, &tmp->status_var);
+  }
   
   mysql_mutex_unlock(&LOCK_thread_count);
   DBUG_VOID_RETURN;
@@ -4523,7 +4560,7 @@ uint get_table_open_method(TABLE_LIST *tables,
 
    @retval FALSE  No error, if lock was obtained TABLE_LIST::mdl_request::ticket
                   is set to non-NULL value.
-   @retval TRUE   Some error occured (probably thread was killed).
+   @retval TRUE   Some error occurred (probably thread was killed).
 */
 
 static bool
@@ -4631,7 +4668,7 @@ static int fill_schema_table_from_frm(THD *thd, TABLE_LIST *tables,
   if (try_acquire_high_prio_shared_mdl_lock(thd, &table_list, can_deadlock))
   {
     /*
-      Some error occured (most probably we have been killed while
+      Some error occurred (most probably we have been killed while
       waiting for conflicting locks to go away), let the caller to
       handle the situation.
     */
@@ -7372,19 +7409,30 @@ int fill_variables(THD *thd, TABLE_LIST *tables, COND *cond)
   const char *wild= lex->wild ? lex->wild->ptr() : NullS;
   enum enum_schema_tables schema_table_idx=
     get_schema_table_idx(tables->schema_table);
-  enum enum_var_type option_type= OPT_SESSION;
+  enum enum_var_type scope= OPT_SESSION;
   bool upper_case_names= (schema_table_idx != SCH_VARIABLES);
   bool sorted_vars= (schema_table_idx == SCH_VARIABLES);
 
   if ((sorted_vars && lex->option_type == OPT_GLOBAL) ||
       schema_table_idx == SCH_GLOBAL_VARIABLES)
-    option_type= OPT_GLOBAL;
+    scope= OPT_GLOBAL;
 
   COND *partial_cond= make_cond_for_info_schema(cond, tables);
 
   mysql_rwlock_rdlock(&LOCK_system_variables_hash);
-  res= show_status_array(thd, wild, enumerate_sys_vars(thd, sorted_vars, option_type),
-                         option_type, NULL, "", tables->table,
+
+  /*
+    Avoid recursive LOCK_system_variables_hash acquisition in
+    intern_sys_var_ptr() by pre-syncing dynamic session variables.
+  */
+  if (scope == OPT_SESSION &&
+      (!thd->variables.dynamic_variables_ptr ||
+       global_system_variables.dynamic_variables_head >
+       thd->variables.dynamic_variables_head))
+    sync_dynamic_session_variables(thd, true);
+
+  res= show_status_array(thd, wild, enumerate_sys_vars(thd, sorted_vars, scope),
+                         scope, NULL, "", tables->table,
                          upper_case_names, partial_cond);
   mysql_rwlock_unlock(&LOCK_system_variables_hash);
   DBUG_RETURN(res);
@@ -7810,11 +7858,12 @@ TABLE *create_schema_table(THD *thd, TABLE_LIST *table_list)
   tmp_table_param->field_count= field_count;
   tmp_table_param->schema_table= 1;
   SELECT_LEX *select_lex= thd->lex->current_select;
+  bool keep_row_order= sql_command_flags[thd->lex->sql_command] & CF_STATUS_COMMAND;
   if (!(table= create_tmp_table(thd, tmp_table_param,
                                 field_list, (ORDER*) 0, 0, 0, 
                                 (select_lex->options | thd->variables.option_bits |
-                                 TMP_TABLE_ALL_COLUMNS),
-                                HA_POS_ERROR, table_list->alias)))
+                                 TMP_TABLE_ALL_COLUMNS), HA_POS_ERROR,
+                                table_list->alias, false, keep_row_order)))
     DBUG_RETURN(0);
   my_bitmap_map* bitmaps=
     (my_bitmap_map*) thd->alloc(bitmap_buffer_size(field_count));
@@ -8176,13 +8225,14 @@ bool get_schema_tables_result(JOIN *join,
     TABLE_LIST *table_list= tab->table->pos_in_table_list;
     if (table_list->schema_table && thd->fill_information_schema_tables())
     {
-#if MYSQL_VERSION_ID > 100105
-#error I_S tables only need to be re-populated if make_cond_for_info_schema() will preserve outer fields
-      bool is_subselect= (&lex->unit != lex->current_select->master_unit() &&
-                          lex->current_select->master_unit()->item);
-#else
-#define is_subselect false
-#endif
+      /*
+        I_S tables only need to be re-populated if make_cond_for_info_schema()
+        preserves outer fields
+      */
+      bool is_subselect= &lex->unit != lex->current_select->master_unit() &&
+                         lex->current_select->master_unit()->item &&
+                         tab->select_cond &&
+                         tab->select_cond->used_tables() & OUTER_REF_TABLE_BIT;
 
       /* A value of 0 indicates a dummy implementation */
       if (table_list->schema_table->fill_table == 0)

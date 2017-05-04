@@ -1,5 +1,5 @@
-/* Copyright (c) 2002, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2013, Monty Program Ab
+/* Copyright (c) 2002, 2015, Oracle and/or its affiliates.
+   Copyright (c) 2008, 2015, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -1420,7 +1420,8 @@ static int mysql_test_update(Prepared_statement *stmt,
     (SELECT_ACL & ~table_list->table->grant.privilege);
   table_list->register_want_access(SELECT_ACL);
 #endif
-  if (setup_fields(thd, 0, stmt->lex->value_list, MARK_COLUMNS_NONE, 0, 0))
+  if (setup_fields(thd, 0, stmt->lex->value_list, MARK_COLUMNS_NONE, 0, 0) ||
+      check_unique_table(thd, table_list))
     goto error;
   /* TODO: here we should send types of placeholders to the client. */
   DBUG_RETURN(0);
@@ -1819,7 +1820,7 @@ static bool mysql_test_create_table(Prepared_statement *stmt)
   @note This function handles create view commands.
 
   @retval FALSE Operation was a success.
-  @retval TRUE An error occured.
+  @retval TRUE An error occurred.
 */
 
 static bool mysql_test_create_view(Prepared_statement *stmt)
@@ -2214,7 +2215,6 @@ static bool check_prepared_statement(Prepared_statement *stmt)
   case SQLCOM_REVOKE:
   case SQLCOM_KILL:
   case SQLCOM_SHUTDOWN:
-  case SQLCOM_LVECMD:
     break;
 
   case SQLCOM_PREPARE:
@@ -3022,7 +3022,7 @@ void mysql_stmt_get_longdata(THD *thd, char *packet, ulong packet_length)
   {
     stmt->state= Query_arena::STMT_ERROR;
     stmt->last_errno= thd->get_stmt_da()->sql_errno();
-    strncpy(stmt->last_error, thd->get_stmt_da()->message(), sizeof(stmt->last_error)-1);
+    strncpy(stmt->last_error, thd->get_stmt_da()->message(), MYSQL_ERRMSG_SIZE);
   }
   thd->set_stmt_da(save_stmt_da);
 
@@ -3457,7 +3457,8 @@ bool Prepared_statement::prepare(const char *packet, uint packet_len)
     thd->mdl_context.release_transactional_locks();
   }
 
-  lex_end(lex);
+  /* Preserve CHANGE MASTER attributes */
+  lex_end_stage1(lex);
   cleanup_stmt();
   thd->restore_backup_statement(this, &stmt_backup);
   thd->stmt_arena= old_stmt_arena;
@@ -3820,8 +3821,8 @@ Prepared_statement::swap_prepared_statement(Prepared_statement *copy)
   swap_variables(LEX_STRING, name, copy->name);
   /* Ditto */
   swap_variables(char *, db, copy->db);
+  swap_variables(size_t, db_length, copy->db_length);
 
-  DBUG_ASSERT(db_length == copy->db_length);
   DBUG_ASSERT(param_count == copy->param_count);
   DBUG_ASSERT(thd == copy->thd);
   last_error[0]= '\0';
@@ -4057,6 +4058,10 @@ void Prepared_statement::deallocate()
 {
   /* We account deallocate in the same manner as mysqld_stmt_close */
   status_var_increment(thd->status_var.com_stmt_close);
+
+  /* It should now be safe to reset CHANGE MASTER parameters */
+  lex_end_stage2(lex);
+
   /* Statement map calls delete stmt on erase */
   thd->stmt_map.erase(this);
 }

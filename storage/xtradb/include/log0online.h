@@ -11,8 +11,8 @@ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
 FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
-this program; if not, write to the Free Software Foundation, Inc., 59 Temple
-Place, Suite 330, Boston, MA 02111-1307 USA
+this program; if not, write to the Free Software Foundation, Inc., 51 Franklin
+Street, Fifth Floor, Boston, MA 02110-1301, USA
 
 *****************************************************************************/
 
@@ -38,19 +38,25 @@ log_online_bitmap_file_range_t;
 /** An iterator over changed page info */
 typedef struct log_bitmap_iterator_struct log_bitmap_iterator_t;
 
-/*********************************************************************//**
-Initializes the online log following subsytem. */
+/** Initialize the constant part of the log tracking subsystem */
+UNIV_INTERN
+void
+log_online_init(void);
+
+/** Initialize the dynamic part of the log tracking subsystem */
 UNIV_INTERN
 void
 log_online_read_init(void);
-/*=======================*/
 
-/*********************************************************************//**
-Shuts down the online log following subsystem. */
+/** Shut down the dynamic part of the log tracking subsystem */
 UNIV_INTERN
 void
 log_online_read_shutdown(void);
-/*===========================*/
+
+/** Shut down the constant part of the log tracking subsystem */
+UNIV_INTERN
+void
+log_online_shutdown(void);
 
 /*********************************************************************//**
 Reads and parses the redo log up to last checkpoint LSN to build the changed
@@ -73,20 +79,7 @@ UNIV_INTERN
 ibool
 log_online_purge_changed_page_bitmaps(
 /*==================================*/
-	ib_uint64_t lsn);	/*!<in: LSN to purge files up to */
-
-/************************************************************//**
-Delete all the bitmap files for data less than the specified LSN.
-If called with lsn == 0 (i.e. set by RESET request) or
-IB_ULONGLONG_MAX, restart the bitmap file sequence, otherwise
-continue it.
-
-@return FALSE to indicate success, TRUE for failure. */
-UNIV_INTERN
-ibool
-log_online_purge_changed_page_bitmaps(
-/*==================================*/
-	ib_uint64_t lsn);	/*!<in: LSN to purge files up to */
+	lsn_t lsn);	/*!<in: LSN to purge files up to */
 
 #define LOG_BITMAP_ITERATOR_START_LSN(i) \
 	((i).start_lsn)
@@ -160,6 +153,8 @@ struct log_online_bitmap_file_range_struct {
 /** Struct for an iterator through all bits of changed pages bitmap blocks */
 struct log_bitmap_iterator_struct
 {
+	lsn_t				max_lsn;	/*!< End LSN of the
+							range */
 	ibool				failed;		/*!< Has the iteration
 							stopped prematurely */
 	log_online_bitmap_file_range_t	in_files;	/*!< The bitmap files

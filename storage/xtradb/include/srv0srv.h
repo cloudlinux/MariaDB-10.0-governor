@@ -1,9 +1,9 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2013, Oracle and/or its affiliates. All rights reserved.
+Copyright (c) 1995, 2016, Oracle and/or its affiliates. All rights reserved.
 Copyright (c) 2008, 2009, Google Inc.
 Copyright (c) 2009, Percona Inc.
-Copyright (c) 2013, 2014, SkySQL Ab. All Rights Reserved.
+Copyright (c) 2013, 2017, MariaDB Corporation Ab. All Rights Reserved.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -152,13 +152,16 @@ extern const char*	srv_main_thread_op_info;
 /** Prefix used by MySQL to indicate pre-5.1 table name encoding */
 extern const char	srv_mysql50_table_name_prefix[10];
 
-/* The monitor thread waits on this event. */
+/** Event to signal srv_monitor_thread. Not protected by a mutex.
+Set after setting srv_print_innodb_monitor. */
 extern os_event_t	srv_monitor_event;
 
-/* The error monitor thread waits on this event. */
+/** Event to signal the shutdown of srv_error_monitor_thread.
+Not protected by a mutex. */
 extern os_event_t	srv_error_event;
 
-/** The buffer pool dump/load thread waits on this event. */
+/** Event for waking up buf_dump_thread. Not protected by a mutex.
+Set on shutdown or by buf_dump_start() or buf_load_start(). */
 extern os_event_t	srv_buf_dump_event;
 
 /** The buffer pool dump/load file name */
@@ -181,8 +184,10 @@ extern os_event_t	srv_checkpoint_completed_event;
 log tracking iteration */
 extern os_event_t	srv_redo_log_tracked_event;
 
-/** srv_redo_log_follow_thread spawn flag */
-extern bool srv_redo_log_thread_started;
+/** Whether the redo log tracker thread has been started. Does not take into
+account whether the tracking is currently enabled (see srv_track_changed_pages
+for that) */
+extern bool		srv_redo_log_thread_started;
 
 /* If the last data file is auto-extended, we add this many pages to it
 at a time */
@@ -222,6 +227,9 @@ extern char*	srv_arch_dir;
 recovery and open all tables in RO mode instead of RW mode. We don't
 sync the max trx id to disk either. */
 extern my_bool	srv_read_only_mode;
+/** Set if InnoDB operates in read-only mode or innodb-force-recovery
+is greater than SRV_FORCE_NO_TRX_UNDO. */
+extern my_bool	high_level_read_only;
 /** store to its own file each table created by an user; data
 dictionary tables are in the system tablespace 0 */
 extern my_bool	srv_file_per_table;
@@ -252,6 +260,7 @@ OS (provided we compiled Innobase with it in), otherwise we will
 use simulated aio we build below with threads.
 Currently we support native aio on windows and linux */
 extern my_bool	srv_use_native_aio;
+extern my_bool	srv_numa_interleave;
 #ifdef __WIN__
 extern ibool	srv_use_native_conditions;
 #endif /* __WIN__ */
@@ -274,6 +283,10 @@ extern char**	srv_data_file_names;
 extern ulint*	srv_data_file_sizes;
 extern ulint*	srv_data_file_is_raw_partition;
 
+
+/** Whether the redo log tracking is currently enabled. Note that it is
+possible for the log tracker thread to be running and the tracking to be
+disabled */
 extern my_bool		srv_track_changed_pages;
 extern ulonglong	srv_max_bitmap_file_size;
 
@@ -315,7 +328,6 @@ extern my_bool	srv_use_sys_malloc;
 extern ibool	srv_use_sys_malloc;
 #endif /* UNIV_HOTBACKUP */
 extern ulint	srv_buf_pool_size;	/*!< requested size in bytes */
-extern my_bool	srv_buf_pool_populate;	/*!< virtual page preallocation */
 extern ulint    srv_buf_pool_instances; /*!< requested number of buffer pool instances */
 extern ulong	srv_n_page_hash_locks;	/*!< number of locks to
 					protect buf_pool->page_hash */
@@ -325,6 +337,8 @@ extern ulong	srv_flush_neighbors;	/*!< whether or not to flush
 					neighbors of a block */
 extern ulint	srv_buf_pool_old_size;	/*!< previously requested size */
 extern ulint	srv_buf_pool_curr_size;	/*!< current size in bytes */
+extern ulong	srv_buf_pool_dump_pct;	/*!< dump that may % of each buffer
+					pool during BP dump */
 extern ulint	srv_mem_pool_size;
 extern ulint	srv_lock_table_size;
 
@@ -393,8 +407,6 @@ extern ulong	srv_innodb_stats_method;
 
 #ifdef UNIV_LOG_ARCHIVE
 extern ibool		srv_log_archive_on;
-extern ibool		srv_archive_recovery;
-extern ib_uint64_t	srv_archive_recovery_limit_lsn;
 #endif /* UNIV_LOG_ARCHIVE */
 
 extern char*	srv_file_flush_method_str;
@@ -410,9 +422,6 @@ extern double	srv_adaptive_flushing_lwm;
 extern ulong	srv_flushing_avg_loops;
 
 extern ulong	srv_force_recovery;
-#ifndef DBUG_OFF
-extern ulong	srv_force_recovery_crash;
-#endif /* !DBUG_OFF */
 
 extern ulint	srv_fast_shutdown;	/*!< If this is 1, do not do a
 					purge and index buffer merge.
@@ -427,6 +436,7 @@ extern unsigned long long	srv_stats_transient_sample_pages;
 extern my_bool			srv_stats_persistent;
 extern unsigned long long	srv_stats_persistent_sample_pages;
 extern my_bool			srv_stats_auto_recalc;
+extern my_bool			srv_stats_include_delete_marked;
 extern unsigned long long	srv_stats_modified_counter;
 extern my_bool			srv_stats_sample_traditional;
 
@@ -436,7 +446,6 @@ extern ibool	srv_use_atomic_writes;
 #ifdef HAVE_POSIX_FALLOCATE
 extern ibool	srv_use_posix_fallocate;
 #endif
-extern ulong	srv_checksum_algorithm;
 
 extern ulong	srv_log_arch_expire_sec;
 
@@ -500,6 +509,9 @@ extern ibool	srv_priority_boost;
 
 extern ulint	srv_truncated_status_writes;
 extern ulint	srv_available_undo_logs;
+
+extern ulint	srv_column_compressed;
+extern ulint	srv_column_decompressed;
 
 extern	ulint	srv_mem_pool_size;
 extern	ulint	srv_lock_table_size;
@@ -852,19 +864,29 @@ ulint
 srv_get_activity_count(void);
 /*========================*/
 /*******************************************************************//**
-Check if there has been any activity.
+Check if there has been any activity. Considers background change buffer
+merge as regular server activity unless a non-default
+old_ibuf_merge_activity_count value is passed, in which case the merge will be
+treated as keeping server idle.
 @return FALSE if no change in activity counter. */
 UNIV_INTERN
 ibool
 srv_check_activity(
 /*===============*/
-	ulint		old_activity_count);	/*!< old activity count */
+	ulint		old_activity_count,	/*!< old activity count */
+						/*!< old change buffer merge
+						activity count, or
+						ULINT_UNDEFINED */
+	ulint		old_ibuf_merge_activity_count = ULINT_UNDEFINED);
 /******************************************************************//**
 Increment the server activity counter. */
 UNIV_INTERN
 void
-srv_inc_activity_count(void);
-/*=========================*/
+srv_inc_activity_count(
+/*===================*/
+	bool ibuf_merge_activity = false);	/*!< whether this activity bump
+						is caused by the background
+						change buffer merge */
 
 /**********************************************************************//**
 Enqueues a task to server task queue and releases a worker thread, if there
@@ -925,7 +947,7 @@ UNIV_INTERN
 os_thread_ret_t
 DECLARE_THREAD(srv_purge_coordinator_thread)(
 /*=========================================*/
-	void*	arg __attribute__((unused)));	/*!< in: a dummy parameter
+	void*	arg MY_ATTRIBUTE((unused)));	/*!< in: a dummy parameter
 						required by os_thread_create */
 
 /*********************************************************************//**
@@ -935,7 +957,7 @@ UNIV_INTERN
 os_thread_ret_t
 DECLARE_THREAD(srv_worker_thread)(
 /*==============================*/
-	void*	arg __attribute__((unused)));	/*!< in: a dummy parameter
+	void*	arg MY_ATTRIBUTE((unused)));	/*!< in: a dummy parameter
 						required by os_thread_create */
 } /* extern "C" */
 
@@ -947,17 +969,12 @@ ulint
 srv_get_task_queue_length(void);
 /*===========================*/
 
-/*********************************************************************//**
-Releases threads of the type given from suspension in the thread table.
-NOTE! The server mutex has to be reserved by the caller!
-@return number of threads released: this may be less than n if not
-enough threads were suspended at the moment */
-UNIV_INTERN
-ulint
-srv_release_threads(
-/*================*/
-	enum srv_thread_type	type,	/*!< in: thread type */
-	ulint			n);	/*!< in: number of threads to release */
+/** Ensure that a given number of threads of the type given are running
+(or are already terminated).
+@param[in]	type	thread type
+@param[in]	n	number of threads that have to run */
+void
+srv_release_threads(enum srv_thread_type type, ulint n);
 
 /**********************************************************************//**
 Check whether any background thread are active. If so print which thread
@@ -968,12 +985,10 @@ const char*
 srv_any_background_threads_are_active(void);
 /*=======================================*/
 
-/**********************************************************************//**
-Wakeup the purge threads. */
+/** Wake up the purge threads. */
 UNIV_INTERN
 void
-srv_purge_wakeup(void);
-/*==================*/
+srv_purge_wakeup();
 
 /** Status variables to be passed to MySQL */
 struct export_var_t{
@@ -1089,6 +1104,8 @@ struct export_var_t{
 	ulint innodb_purge_view_trx_id_age;	/*!< rw_max_trx_id
 						- purged view's min trx_id */
 #endif /* UNIV_DEBUG */
+	ulint innodb_column_compressed;		/*!< srv_column_compressed */
+	ulint innodb_column_decompressed;	/*!< srv_column_decompressed */
 };
 
 /** Thread slot in the thread table.  */
@@ -1119,6 +1136,7 @@ struct srv_slot_t{
 #else /* !UNIV_HOTBACKUP */
 # define srv_use_adaptive_hash_indexes		FALSE
 # define srv_use_native_aio			FALSE
+# define srv_numa_interleave			FALSE
 # define srv_force_recovery			0UL
 # define srv_set_io_thread_op_info(t,info)	((void) 0)
 # define srv_reset_io_thread_op_info()		((void) 0)
@@ -1128,5 +1146,13 @@ struct srv_slot_t{
 # define srv_start_raw_disk_in_use		0
 # define srv_file_per_table			1
 #endif /* !UNIV_HOTBACKUP */
+
+#ifndef DBUG_OFF
+/** false before InnoDB monitor has been printed at least once, true
+afterwards */
+extern bool	srv_debug_monitor_printed;
+#else
+#define	srv_debug_monitor_printed	false
+#endif
 
 #endif

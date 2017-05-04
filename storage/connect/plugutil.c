@@ -143,7 +143,7 @@ PGLOBAL PlugInit(LPCSTR Language, uint worksize)
     fprintf(stderr, MSG(GLOBAL_ERROR), (int)sizeof(GLOBAL));
     return NULL;
   } else {
-    g->Sarea_Size = worksize;
+    g->Sarea = NULL;
     g->Createas = 0;
     g->Alchecked = 0;
     g->Mrr = 0;
@@ -155,7 +155,7 @@ PGLOBAL PlugInit(LPCSTR Language, uint worksize)
     /*******************************************************************/
     /*  Allocate the main work segment.                                */
     /*******************************************************************/
-    if (!(g->Sarea = PlugAllocMem(g, worksize))) {
+    if (worksize && !(g->Sarea = PlugAllocMem(g, worksize))) {
       char errmsg[256];
       sprintf(errmsg, MSG(WORK_AREA), g->Message);
       strcpy(g->Message, errmsg);
@@ -163,7 +163,7 @@ PGLOBAL PlugInit(LPCSTR Language, uint worksize)
     } else
       g->Sarea_Size = worksize;
 
-    } /* endif g */
+  } /* endif g */
 
   g->jump_level = -1;   /* New setting to allow recursive call of Plug */
   return(g);
@@ -243,6 +243,9 @@ LPCSTR PlugSetPath(LPSTR pBuff, LPCSTR prefix, LPCSTR FileName, LPCSTR defpath)
 #else
   char *drive = NULL, *defdrv = NULL;
 #endif
+
+	if (trace > 1)
+		htrc("prefix=%s fn=%s path=%s\n", prefix, FileName, defpath);
 
   if (!strncmp(FileName, "//", 2) || !strncmp(FileName, "\\\\", 2)) {
     strcpy(pBuff, FileName);       // Remote file
@@ -516,7 +519,9 @@ void *PlugSubAlloc(PGLOBAL g, void *memp, size_t size)
     if (trace)
       htrc("PlugSubAlloc: %s\n", g->Message);
 
-    longjmp(g->jumper[g->jump_level], 1);
+		/* Nothing we can do if longjmp is not initialized.	*/
+		assert(g->jump_level >= 0);
+	  longjmp(g->jumper[g->jump_level], 1);
     } /* endif size OS32 code */
 
   /*********************************************************************/

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2015, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -307,7 +307,11 @@ trx_free_prepared(
 /*==============*/
 	trx_t*	trx)	/*!< in, own: trx object */
 {
-	ut_a(trx_state_eq(trx, TRX_STATE_PREPARED));
+	ut_a(trx_state_eq(trx, TRX_STATE_PREPARED)
+	     || (trx_state_eq(trx, TRX_STATE_ACTIVE)
+		 && trx->is_recovered
+		 && (srv_read_only_mode
+		     || srv_force_recovery >= SRV_FORCE_NO_TRX_UNDO)));
 	ut_a(trx->magic_n == TRX_MAGIC_N);
 
 	lock_trx_release_locks(trx);
@@ -963,7 +967,7 @@ trx_serialisation_number_get(
 /****************************************************************//**
 Assign the transaction its history serialisation number and write the
 update UNDO log record to the assigned rollback segment. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 trx_write_serialisation_history(
 /*============================*/
@@ -1034,7 +1038,7 @@ trx_write_serialisation_history(
 
 /********************************************************************
 Finalize a transaction containing updates for a FTS table. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 trx_finalize_for_fts_table(
 /*=======================*/
@@ -1067,7 +1071,7 @@ trx_finalize_for_fts_table(
 
 /******************************************************************//**
 Finalize a transaction containing updates to FTS tables. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 trx_finalize_for_fts(
 /*=================*/
@@ -1135,7 +1139,7 @@ trx_flush_log_if_needed_low(
 /**********************************************************************//**
 If required, flushes the log to disk based on the value of
 innodb_flush_log_at_trx_commit. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 trx_flush_log_if_needed(
 /*====================*/
@@ -1150,7 +1154,7 @@ trx_flush_log_if_needed(
 
 /****************************************************************//**
 Commits a transaction in memory. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 trx_commit_in_memory(
 /*=================*/
@@ -2130,7 +2134,7 @@ which is in the prepared state
 @return	trx on match, the trx->xid will be invalidated;
 note that the trx may have been committed, unless the caller is
 holding lock_sys->mutex */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 trx_t*
 trx_get_trx_by_xid_low(
 /*===================*/

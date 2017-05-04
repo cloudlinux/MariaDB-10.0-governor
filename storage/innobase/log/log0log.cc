@@ -1,7 +1,8 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2014, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2009, Google Inc.
+Copyright (c) 2017, MariaDB Corporation. All Rights Reserved.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -975,7 +976,7 @@ log_group_init(
 	ulint	space_id,		/*!< in: space id of the file space
 					which contains the log files of this
 					group */
-	ulint	archive_space_id __attribute__((unused)))
+	ulint	archive_space_id MY_ATTRIBUTE((unused)))
 					/*!< in: space id of the file space
 					which contains some archived log
 					files for this group; currently, only
@@ -1459,17 +1460,7 @@ log_write_up_to(
 	}
 
 loop:
-#ifdef UNIV_DEBUG
-	loop_count++;
-
-	ut_ad(loop_count < 5);
-
-# if 0
-	if (loop_count > 2) {
-		fprintf(stderr, "Log loop count %lu\n", loop_count);
-	}
-# endif
-#endif
+	ut_ad(++loop_count < 100);
 
 	mutex_enter(&(log_sys->mutex));
 	ut_ad(!recv_no_log_write);
@@ -2359,7 +2350,7 @@ void
 log_archived_file_name_gen(
 /*=======================*/
 	char*	buf,	/*!< in: buffer where to write */
-	ulint	id __attribute__((unused)),
+	ulint	id MY_ATTRIBUTE((unused)),
 			/*!< in: group id;
 			currently we only archive the first group */
 	ulint	file_no)/*!< in: file number */
@@ -3204,7 +3195,6 @@ logs_empty_and_mark_files_at_shutdown(void)
 	lsn_t			lsn;
 	ulint			arch_log_no;
 	ulint			count = 0;
-	ulint			total_trx;
 	ulint			pending_io;
 	enum srv_thread_type	active_thd;
 	const char*		thread_name;
@@ -3251,10 +3241,9 @@ loop:
 	shutdown, because the InnoDB layer may have committed or
 	prepared transactions and we don't want to lose them. */
 
-	total_trx = trx_sys_any_active_transactions();
-
-	if (total_trx > 0) {
-
+	if (ulint total_trx = srv_was_started && !srv_read_only_mode
+	    && srv_force_recovery < SRV_FORCE_NO_TRX_UNDO
+	    ? trx_sys_any_active_transactions() : 0) {
 		if (srv_print_verbose_log && count > 600) {
 			ib_logf(IB_LOG_LEVEL_INFO,
 				"Waiting for %lu active transactions to finish",
@@ -3413,11 +3402,7 @@ loop:
 
 	lsn = log_sys->lsn;
 
-	ut_ad(srv_force_recovery != SRV_FORCE_NO_LOG_REDO
-	      || lsn == log_sys->last_checkpoint_lsn + LOG_BLOCK_HDR_SIZE);
-
-	if ((srv_force_recovery != SRV_FORCE_NO_LOG_REDO
-	     && lsn != log_sys->last_checkpoint_lsn)
+	if (lsn != log_sys->last_checkpoint_lsn
 #ifdef UNIV_LOG_ARCHIVE
 	    || (srv_log_archive_on
 		&& lsn != log_sys->archived_lsn + LOG_BLOCK_HDR_SIZE)

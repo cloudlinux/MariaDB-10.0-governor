@@ -47,12 +47,9 @@ SYM_GROUP sym_group_rtree= {"RTree keys", "HAVE_RTREE_KEYS"};
 
 static SYMBOL symbols[] = {
   { "&&",		SYM(AND_AND_SYM)},
-  { "<",		SYM(LT)},
   { "<=",		SYM(LE)},
   { "<>",		SYM(NE)},
   { "!=",		SYM(NE)},
-  { "=",		SYM(EQ)},
-  { ">",		SYM(GT_SYM)},
   { ">=",		SYM(GE)},
   { "<<",		SYM(SHIFT_LEFT)},
   { ">>",		SYM(SHIFT_RIGHT)},
@@ -342,9 +339,6 @@ static SYMBOL symbols[] = {
   { "LONGTEXT",		SYM(LONGTEXT)},
   { "LOOP",             SYM(LOOP_SYM)},
   { "LOW_PRIORITY",	SYM(LOW_PRIORITY)},
-  { "LVECMD",          SYM(LVECMD_SYM)},
-  { "LVEMEM",          SYM(LVEMEM_SYM)},
-  { "LVEPROCESS",          SYM(LVEPROCESS_SYM)},
   { "MASTER",           SYM(MASTER_SYM)},
   { "MASTER_CONNECT_RETRY",           SYM(MASTER_CONNECT_RETRY_SYM)},
   { "MASTER_GTID_POS",  SYM(MASTER_GTID_POS_SYM)},

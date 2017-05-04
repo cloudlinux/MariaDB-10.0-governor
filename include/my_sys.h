@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2013, Monty Program Ab.
+   Copyright (c) 2010, 2016, Monty Program Ab.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -64,9 +64,9 @@ typedef struct my_aio_result {
 #define MY_FAE		8	/* Fatal if any error */
 #define MY_WME		16	/* Write message on error */
 #define MY_WAIT_IF_FULL 32	/* Wait and try again if disk full error */
-#define MY_IGNORE_BADFD 32      /* my_sync: ignore 'bad descriptor' errors */
-#define MY_UNUSED       64      /* Unused (was support for RAID) */
-#define MY_FULL_IO     512      /* For my_read - loop intil I/O is complete */
+#define MY_IGNORE_BADFD 32      /* my_sync(): ignore 'bad descriptor' errors */
+#define MY_NOSYMLINKS  512      /* my_open(): don't follow symlinks */
+#define MY_FULL_IO     512      /* my_read(): loop intil I/O is complete */
 #define MY_DONT_CHECK_FILESIZE 128 /* Option to init_io_cache() */
 #define MY_LINK_WARNING 32	/* my_redel() gives warning if links */
 #define MY_COPYTIME	64	/* my_redel() copys time */
@@ -168,6 +168,7 @@ extern void set_malloc_size_cb(MALLOC_SIZE_CB func);
 	/* defines when allocating data */
 extern void *my_malloc(size_t Size,myf MyFlags);
 extern void *my_multi_malloc(myf MyFlags, ...);
+extern void *my_multi_malloc_large(myf MyFlags, ...);
 extern void *my_realloc(void *oldpoint, size_t Size, myf MyFlags);
 extern void my_free(void *ptr);
 extern void *my_memdup(const void *from,size_t length,myf MyFlags);
@@ -209,7 +210,13 @@ extern void my_large_free(uchar *ptr);
 #define my_safe_afree(ptr, size, max_alloca_sz) my_afree(ptr)
 #endif /* HAVE_ALLOCA */
 
-#include <errno.h>				/* errno is a define */
+#ifndef errno				/* did we already get it? */
+#ifdef HAVE_ERRNO_AS_DEFINE
+#include <errno.h>			/* errno is a define */
+#else
+extern int errno;			/* declare errno */
+#endif
+#endif					/* #ifndef errno */
 extern char *home_dir;			/* Home directory for user */
 extern MYSQL_PLUGIN_IMPORT char  *mysql_data_home;
 extern const char *my_progname;		/* program-name (printed in errors) */
@@ -246,14 +253,13 @@ extern ulong	my_file_opened,my_stream_opened, my_tmp_file_created;
 extern ulong    my_file_total_opened;
 extern ulong    my_sync_count;
 extern uint	mysys_usage_id;
-extern my_bool	my_init_done;
+extern my_bool	my_init_done, my_thr_key_mysys_exists;
 extern my_bool  my_assert_on_error;
 extern myf      my_global_flags;        /* Set to MY_WME for more error messages */
 					/* Point to current my_message() */
 extern void (*my_sigtstp_cleanup)(void),
 					/* Executed before jump to shell */
-	    (*my_sigtstp_restart)(void),
-	    (*my_abort_hook)(int);
+	    (*my_sigtstp_restart)(void);
 					/* Executed when comming from shell */
 extern MYSQL_PLUGIN_IMPORT int my_umask;		/* Default creation mask  */
 extern int my_umask_dir,
@@ -265,7 +271,7 @@ extern my_bool my_use_symdir;
 extern ulong	my_default_record_cache_size;
 extern my_bool  my_disable_locking, my_disable_async_io,
                 my_disable_flush_key_blocks, my_disable_symlinks;
-extern my_bool my_disable_sync;
+extern my_bool my_disable_sync, my_disable_copystat_in_redel;
 extern char	wild_many,wild_one,wild_prefix;
 extern const char *charsets_dir;
 extern my_bool timed_mutexes;
@@ -561,6 +567,7 @@ my_off_t my_b_safe_tell(IO_CACHE* info); /* picks the correct tell() */
 typedef uint32 ha_checksum;
 extern ulong my_crc_dbug_check;
 
+extern int (*mysys_test_invalid_symlink)(const char *filename);
 #include <my_alloc.h>
 
 	/* Prototypes for mysys and my_func functions */
@@ -588,9 +595,11 @@ extern int my_realpath(char *to, const char *filename, myf MyFlags);
 extern File my_create_with_symlink(const char *linkname, const char *filename,
 				   int createflags, int access_flags,
 				   myf MyFlags);
-extern int my_delete_with_symlink(const char *name, myf MyFlags);
 extern int my_rename_with_symlink(const char *from,const char *to,myf MyFlags);
 extern int my_symlink(const char *content, const char *linkname, myf MyFlags);
+extern int my_handler_delete_with_symlink(PSI_file_key key, const char *name,
+                                          const char *ext, myf sync_dir);
+
 extern size_t my_read(File Filedes,uchar *Buffer,size_t Count,myf MyFlags);
 extern size_t my_pread(File Filedes,uchar *Buffer,size_t Count,my_off_t offset,
 		     myf MyFlags);
@@ -614,8 +623,12 @@ extern void *my_memmem(const void *haystack, size_t haystacklen,
 
 #ifdef _WIN32
 extern int      my_access(const char *path, int amode);
+#define my_check_user(A,B) (NULL)
+#define my_set_user(A,B,C) (0)
 #else
 #define my_access access
+struct passwd *my_check_user(const char *user, myf MyFlags);
+int my_set_user(const char *user, struct passwd *user_info, myf MyFlags);
 #endif
 
 extern int check_if_legal_filename(const char *path);
@@ -635,7 +648,7 @@ extern void     my_osmaperr(unsigned long last_error);
 #endif
 
 extern void init_glob_errs(void);
-extern const char** get_global_errmsgs();
+extern const char** get_global_errmsgs(void);
 extern void wait_for_free_space(const char *filename, int errors);
 extern FILE *my_fopen(const char *FileName,int Flags,myf MyFlags);
 extern FILE *my_fdopen(File Filedes,const char *name, int Flags,myf MyFlags);
@@ -660,7 +673,7 @@ extern void my_printf_error(uint my_err, const char *format,
                             ATTRIBUTE_FORMAT(printf, 2, 4);
 extern void my_printv_error(uint error, const char *format, myf MyFlags,
                             va_list ap);
-extern int my_error_register(const char** (*get_errmsgs) (),
+extern int my_error_register(const char** (*get_errmsgs) (void),
                              uint first, uint last);
 extern const char **my_error_unregister(uint first, uint last);
 extern void my_message(uint my_err, const char *str,myf MyFlags);
@@ -878,12 +891,12 @@ extern uint my_set_max_open_files(uint files);
 void my_free_open_file_info(void);
 
 extern my_bool my_gethwaddr(uchar *to);
-extern int my_getncpus();
+extern int my_getncpus(void);
 
 #define HRTIME_RESOLUTION               1000000ULL  /* microseconds */
 typedef struct {ulonglong val;} my_hrtime_t;
-void my_time_init();
-extern my_hrtime_t my_hrtime();
+void my_time_init(void);
+extern my_hrtime_t my_hrtime(void);
 extern ulonglong my_interval_timer(void);
 extern ulonglong my_getcputime(void);
 
@@ -942,7 +955,7 @@ int my_msync(int, void *, size_t, int);
 void my_uuid_init(ulong seed1, ulong seed2);
 void my_uuid(uchar *guid);
 void my_uuid2str(const uchar *guid, char *s);
-void my_uuid_end();
+void my_uuid_end(void);
 
 /* character sets */
 extern void my_charset_loader_init_mysys(MY_CHARSET_LOADER *loader);

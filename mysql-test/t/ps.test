@@ -3633,3 +3633,85 @@ SELECT 1 FROM t1 GROUP BY 0 OR 18446744073709551615+1;
 drop table t1;
 
 --echo # End of 5.3 tests
+
+--echo #
+--echo # MDEV-8756: MariaDB 10.0.21 crashes during PREPARE
+--echo #
+
+CREATE TABLE t1 ( id INT(10), value INT(10) );
+CREATE TABLE t2 ( id INT(10) );
+SET @save_sql_mode= @@sql_mode;
+SET SESSION sql_mode = 'ONLY_FULL_GROUP_BY';
+
+PREPARE stmt FROM 'UPDATE t1 t1 SET value = (SELECT 1 FROM t2 WHERE id = t1.id)'; 
+execute stmt;
+insert into t1 values (1,10),(2,10),(3,10);
+insert into t2 values (1),(2);
+execute stmt;
+select * from t1;
+deallocate prepare stmt;
+SET SESSION sql_mode = @save_sql_mode;
+DROP TABLE t1,t2;
+
+--echo #
+--echo # MDEV-8833: Crash of server on prepared statement with
+--echo # conversion to semi-join
+--echo #
+
+CREATE TABLE t1 (column1 INT);
+INSERT INTO t1 VALUES (3),(9);
+
+CREATE TABLE t2 (column2 INT);
+INSERT INTO t2 VALUES (1),(4);
+
+CREATE TABLE t3 (column3 INT);
+INSERT INTO t3 VALUES (6),(8);
+
+CREATE TABLE t4 (column4 INT);
+INSERT INTO t4 VALUES (2),(5);
+
+PREPARE stmt FROM "SELECT ( SELECT MAX( table1.column1 ) AS field1 
+FROM t1 AS table1
+WHERE table3.column3 IN ( SELECT table2.column2 AS field2 FROM t2 AS table2 ) 
+) AS sq
+FROM t3 AS table3, t4 AS table4";
+EXECUTE stmt;
+EXECUTE stmt;
+deallocate prepare stmt;
+drop table t1,t2,t3,t4;
+
+--echo #
+--echo # MDEV-11859: the plans for the first and the second executions
+--echo #             of PS are not the same
+--echo #
+
+create table t1 (id int, c varchar(3), key idx(c))engine=myisam;
+insert into t1 values (3,'bar'), (1,'xxx'), (2,'foo'), (5,'yyy');
+
+prepare stmt1 from
+"explain extended
+ select * from t1 where (1, 2) in ( select 3, 4 ) or c = 'foo'";
+execute stmt1;
+execute stmt1;
+deallocate prepare stmt1;
+
+prepare stmt1 from
+"select * from t1 where (1, 2) in ( select 3, 4 ) or c = 'foo'";
+flush status;
+execute stmt1;
+show status like '%Handler_read%';
+flush status;
+execute stmt1;
+show status like '%Handler_read%';
+deallocate prepare stmt1;
+
+prepare stmt2 from
+"explain extended
+ select * from t1 where (1, 2) in ( select 3, 4 )";
+execute stmt2;
+execute stmt2;
+deallocate prepare stmt2;
+
+drop table t1;
+
+--echo # End of 5.5 tests

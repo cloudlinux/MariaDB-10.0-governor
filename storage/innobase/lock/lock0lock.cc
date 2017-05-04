@@ -1,7 +1,7 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2015, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2014, 2015, MariaDB Corporation
+Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2014, 2016, MariaDB Corporation
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -424,7 +424,7 @@ ibool
 lock_rec_validate_page(
 /*===================*/
 	const buf_block_t*	block)	/*!< in: buffer block */
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((nonnull, warn_unused_result));
 #endif /* UNIV_DEBUG */
 
 /* The lock system */
@@ -508,7 +508,7 @@ Checks that a transaction id is sensible, i.e., not in the future.
 #ifdef UNIV_DEBUG
 UNIV_INTERN
 #else
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 #endif
 bool
 lock_check_trx_id_sanity(
@@ -633,7 +633,7 @@ lock_sys_create(
 	lock_sys->rec_hash = hash_create(n_cells);
 
 	if (!srv_read_only_mode) {
-		lock_latest_err_file = os_file_create_tmpfile();
+		lock_latest_err_file = os_file_create_tmpfile(NULL);
 		ut_a(lock_latest_err_file);
 	}
 }
@@ -2691,8 +2691,8 @@ lock_rec_inherit_to_gap(
 	/* If srv_locks_unsafe_for_binlog is TRUE or session is using
 	READ COMMITTED isolation level, we do not want locks set
 	by an UPDATE or a DELETE to be inherited as gap type locks. But we
-	DO want S-locks set by a consistency constraint to be inherited also
-	then. */
+	DO want S-locks/X-locks(taken for replace) set by a consistency
+	constraint to be inherited also then */
 
 	for (lock = lock_rec_get_first(block, heap_no);
 	     lock != NULL;
@@ -2702,7 +2702,8 @@ lock_rec_inherit_to_gap(
 		    && !((srv_locks_unsafe_for_binlog
 			  || lock->trx->isolation_level
 			  <= TRX_ISO_READ_COMMITTED)
-			 && lock_get_mode(lock) == LOCK_X)) {
+			 && lock_get_mode(lock) ==
+			 (lock->trx->duplicates ? LOCK_S : LOCK_X))) {
 
 			lock_rec_add_to_queue(
 				LOCK_REC | LOCK_GAP | lock_get_mode(lock),
@@ -3672,7 +3673,7 @@ lock_get_next_lock(
 			ut_ad(heap_no == ULINT_UNDEFINED);
 			ut_ad(lock_get_type_low(lock) == LOCK_TABLE);
 
-			lock = UT_LIST_GET_PREV(un_member.tab_lock.locks, lock);
+			lock = UT_LIST_GET_NEXT(un_member.tab_lock.locks, lock);
 		}
 	} while (lock != NULL
 		 && lock->trx->lock.deadlock_mark > ctx->mark_start);
@@ -3722,7 +3723,8 @@ lock_get_first_lock(
 	} else {
 		*heap_no = ULINT_UNDEFINED;
 		ut_ad(lock_get_type_low(lock) == LOCK_TABLE);
-		lock = UT_LIST_GET_PREV(un_member.tab_lock.locks, lock);
+		dict_table_t*   table = lock->un_member.tab_lock.table;
+		lock = UT_LIST_GET_FIRST(table->locks);
 	}
 
 	ut_a(lock != NULL);
@@ -4542,7 +4544,8 @@ lock_table(
 	dberr_t		err;
 	const lock_t*	wait_for;
 
-	ut_ad(table && thr);
+	ut_ad(table != NULL);
+	ut_ad(thr != NULL);
 
 	if (flags & BTR_NO_LOCKING_FLAG) {
 
@@ -5952,7 +5955,7 @@ lock_validate_table_locks(
 /*********************************************************************//**
 Validate record locks up to a limit.
 @return lock at limit or NULL if no more locks in the hash bucket */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 const lock_t*
 lock_rec_validate(
 /*==============*/

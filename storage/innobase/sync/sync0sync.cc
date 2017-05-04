@@ -1,7 +1,8 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2015, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2008, Google Inc.
+Copyright (c) 2017, MariaDB Corporation. All Rights Reserved.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -384,10 +385,10 @@ ulint
 mutex_enter_nowait_func(
 /*====================*/
 	ib_mutex_t*	mutex,		/*!< in: pointer to mutex */
-	const char*	file_name __attribute__((unused)),
+	const char*	file_name MY_ATTRIBUTE((unused)),
 					/*!< in: file name where mutex
 					requested */
-	ulint		line __attribute__((unused)))
+	ulint		line MY_ATTRIBUTE((unused)))
 					/*!< in: line where requested */
 {
 	ut_ad(mutex_validate(mutex));
@@ -1235,7 +1236,7 @@ sync_thread_add_level(
 	case SYNC_TRX_UNDO_PAGE:
 		/* Purge is allowed to read in as many UNDO pages as it likes,
 		there was a bogus rule here earlier that forced the caller to
-		acquire the purge_sys_t::mutex. The purge mutex did not really
+		acquire the trx_purge_t::mutex. The purge mutex did not really
 		protect anything because it was only ever acquired by the
 		single purge thread. The purge thread can read the UNDO pages
 		without any covering mutex. */

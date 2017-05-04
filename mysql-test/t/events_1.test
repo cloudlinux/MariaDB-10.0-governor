@@ -125,7 +125,7 @@ drop event existant;
 
 create table t_event3 (a int, b float);
 drop event if exists event3;
-create event event3 on schedule every 50 + 10 minute starts date_add("20100101", interval 5 minute) ends date_add("20151010", interval 5 day) comment "portokala_comment" DO insert into t_event3 values (unix_timestamp(), rand());
+create event event3 on schedule every 50 + 10 minute starts date_add(curdate(), interval 5 minute) ends date_add(curdate(), interval 5 day) comment "portokala_comment" DO insert into t_event3 values (unix_timestamp(), rand());
 let $wait_condition=SELECT count(*)=0 from t_event3;
 --source include/wait_condition.inc
 select count(*) from t_event3;
@@ -457,6 +457,25 @@ DROP EVENT ev1;
 
 --echo
 SHOW EVENTS;
+
+
+--echo #
+--echo # MDEV-9524 Cannot load from mysql.event when sql_mode is set to PAD_CHAR_TO_FULL_LENGTH
+--echo #
+CREATE TABLE t1 (a INT);
+CREATE EVENT ev1 ON SCHEDULE EVERY 5 SECOND DO DELETE FROM t1;
+--replace_column 8 # 9 #
+SHOW EVENTS;
+SET sql_mode=PAD_CHAR_TO_FULL_LENGTH;
+--replace_column 8 # 9 #
+SHOW EVENTS;
+DROP EVENT ev1;
+CREATE EVENT ev1 ON SCHEDULE EVERY 5 SECOND DO DELETE FROM t1;
+--replace_column 8 # 9 #
+SHOW EVENTS;
+DROP EVENT ev1;
+DROP TABLE t1;
+SET sql_mode=DEFAULT;
 
 
 --echo

@@ -38,14 +38,6 @@ void free_list(I_List <i_string> *list)
 }
 
 
-void free_list(I_List <i_thd> *list)
-{
-  i_thd *tmp;
-  while ((tmp= list->get()))
-    delete tmp;
-}
-
-
 base_list::base_list(const base_list &rhs, MEM_ROOT *mem_root)
 {
   if (rhs.elements)

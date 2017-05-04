@@ -1,6 +1,7 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2013, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2017, MariaDB Corporation. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -732,8 +733,7 @@ buf_flush_write_complete(
 	flush_type = buf_page_get_flush_type(bpage);
 	buf_pool->n_flush[flush_type]--;
 
-	/* fprintf(stderr, "n pending flush %lu\n",
-	buf_pool->n_flush[flush_type]); */
+	ut_ad(buf_pool_mutex_own(buf_pool));
 
 	if (buf_pool->n_flush[flush_type] == 0
 	    && buf_pool->init_flush[flush_type] == FALSE) {
@@ -938,11 +938,11 @@ buf_flush_write_block_low(
 		break;
 	case BUF_BLOCK_ZIP_DIRTY:
 		frame = bpage->zip.data;
+		mach_write_to_8(frame + FIL_PAGE_LSN,
+				bpage->newest_modification);
 
 		ut_a(page_zip_verify_checksum(frame, zip_size));
 
-		mach_write_to_8(frame + FIL_PAGE_LSN,
-				bpage->newest_modification);
 		memset(frame + FIL_PAGE_FILE_FLUSH_LSN, 0, 8);
 		break;
 	case BUF_BLOCK_FILE_PAGE:
@@ -2402,7 +2402,7 @@ extern "C" UNIV_INTERN
 os_thread_ret_t
 DECLARE_THREAD(buf_flush_page_cleaner_thread)(
 /*==========================================*/
-	void*	arg __attribute__((unused)))
+	void*	arg MY_ATTRIBUTE((unused)))
 			/*!< in: a dummy parameter required by
 			os_thread_create */
 {

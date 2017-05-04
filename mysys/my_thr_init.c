@@ -44,6 +44,8 @@ static uint get_thread_lib(void);
 
 /** True if @c my_thread_global_init() has been called. */
 static my_bool my_thread_global_init_done= 0;
+/* True if THR_KEY_mysys is created */
+my_bool my_thr_key_mysys_exists= 0;
 
 
 /*
@@ -167,11 +169,20 @@ my_bool my_thread_global_init(void)
     return 0;
   my_thread_global_init_done= 1;
 
-  if ((pth_ret= pthread_key_create(&THR_KEY_mysys, NULL)) != 0)
+  /*
+    THR_KEY_mysys is deleted in my_end() as DBUG libraries are using it even
+    after my_thread_global_end() is called.
+    my_thr_key_mysys_exist is used to protect against application like QT
+    that calls my_thread_global_init() + my_thread_global_end() multiple times
+    without calling my_init() + my_end().
+  */
+  if (!my_thr_key_mysys_exists &&
+      (pth_ret= pthread_key_create(&THR_KEY_mysys, NULL)) != 0)
   {
     fprintf(stderr, "Can't initialize threads: error %d\n", pth_ret);
     return 1;
   }
+  my_thr_key_mysys_exists= 1;
 
   /* Mutex used by my_thread_init() and after my_thread_destroy_mutex() */
   my_thread_init_internal_mutex();
@@ -372,6 +383,8 @@ void my_thread_end(void)
       mysql_cond_signal(&THR_COND_threads);
     mysql_mutex_unlock(&THR_LOCK_threads);
 
+    /* Trash variable so that we can detect false accesses to my_thread_var */
+    tmp->init= 2;
     TRASH(tmp, sizeof(*tmp));
     free(tmp);
   }

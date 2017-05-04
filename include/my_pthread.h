@@ -86,10 +86,12 @@ typedef volatile LONG my_pthread_once_t;
 #define MY_PTHREAD_ONCE_INPROGRESS 1
 #define MY_PTHREAD_ONCE_DONE 2
 
+#if !STRUCT_TIMESPEC_HAS_TV_SEC  || !STRUCT_TIMESPEC_HAS_TV_NSEC
 struct timespec {
   time_t tv_sec;
   long tv_nsec;
 };
+#endif
 
 int win_pthread_mutex_trylock(pthread_mutex_t *mutex);
 int pthread_create(pthread_t *, const pthread_attr_t *, pthread_handler, void *);
@@ -147,24 +149,13 @@ int put_in_lve(char *user);
 void lve_thr_exit();
 void governor_setlve_mysql_thread_info(pid_t thread_id);
 void governor_detroy_mysql_thread_info();
-int send_to_client_debug_data_lvedebug_info(void *buffer, int max_size);
-long get_memusage_lvedebug_info();
-void create_core_dump_lvedebug_info();
-void *init_info_retarray_lvedbug_info(int size);
-void release_info_retarray_lvedbug_info(void *ptr);
-void retinfo_info_retarray_lvedbug_info(char *buffer, int field, void *data, int index, int buf_len);
-void release_thread_chanks_lvedebug_info();
-void make_snapshot_lvedebug_info(long number_of_in, long numbers_of_out,
-	int real_lve, void *mysql_lve_mutex_governor_ptr_n, char *fname,
-	void *mtx);
-void init_data_lvedebug_info(char *sql, char *user_name);
-void free_lvedebug_info();
-int initialize_lvedebug_info();
 __attribute__ ((noinline)) int my_pthread_lvemutex_unlock(pthread_mutex_t *mutex);
 __attribute__ ((noinline)) int my_pthread_lvemutex_lock(my_pthread_fastmutex_t *mp);
 __attribute__ ((noinline)) int my_pthread_lvemutex_trylock(pthread_mutex_t *mutex);
 __attribute__((noinline)) void my_release_slot();
 __attribute__((noinline)) void my_reserve_slot();
+__attribute__((noinline)) void lve_critical_section_begin();
+__attribute__((noinline)) void lve_critical_section_end();
 #define pthread_mutex_lock(A) my_pthread_lvemutex_lock(A)
 #define pthread_mutex_unlock(A) my_pthread_lvemutex_unlock(&(A)->mutex)
 #define pthread_mutex_trylock(A) my_pthread_lvemutex_trylock(&(A)->mutex)
@@ -437,21 +428,10 @@ int put_in_lve(char *user);
 void lve_thr_exit();
 void governor_setlve_mysql_thread_info(pid_t thread_id);
 void governor_detroy_mysql_thread_info();
-int send_to_client_debug_data_lvedebug_info(void *buffer, int max_size);
-long get_memusage_lvedebug_info();
-void create_core_dump_lvedebug_info();
-void *init_info_retarray_lvedbug_info(int size);
-void release_info_retarray_lvedbug_info(void *ptr);
-void retinfo_info_retarray_lvedbug_info(char *buffer, int field, void *data, int index, int buf_len);
-void release_thread_chanks_lvedebug_info();
-void make_snapshot_lvedebug_info(long number_of_in, long numbers_of_out,
-	int real_lve, void *mysql_lve_mutex_governor_ptr_n, char *fname,
-	void *mtx);
-void init_data_lvedebug_info(char *sql, char *user_name);
-void free_lvedebug_info();
-int initialize_lvedebug_info();
 __attribute__((noinline)) void my_release_slot();
 __attribute__((noinline)) void my_reserve_slot();
+__attribute__((noinline)) void lve_critical_section_begin();
+__attribute__((noinline)) void lve_critical_section_end();
 
 int safe_mutex_init(safe_mutex_t *mp, const pthread_mutexattr_t *attr,
                     const char *name, const char *file, uint line);
@@ -746,8 +726,8 @@ extern void my_thread_end(void);
 extern const char *my_thread_name(void);
 extern my_thread_id my_thread_dbug_id(void);
 extern int pthread_dummy(int);
-extern void my_mutex_init();
-extern void my_mutex_end();
+extern void my_mutex_init(void);
+extern void my_mutex_end(void);
 
 /* All thread specific variables are in the following struct */
 
@@ -790,8 +770,8 @@ struct st_my_thread_var
 };
 
 extern struct st_my_thread_var *_my_thread_var(void) __attribute__ ((const));
-extern void **my_thread_var_dbug();
-extern safe_mutex_t **my_thread_var_mutex_in_use();
+extern void **my_thread_var_dbug(void);
+extern safe_mutex_t **my_thread_var_mutex_in_use(void);
 extern uint my_thread_end_wait_time;
 extern my_bool safe_mutex_deadlock_detector;
 #define my_thread_var (_my_thread_var())

@@ -658,15 +658,6 @@ public:
   i_string(const char* s) : ptr(s) {}
 };
 
-/* DB_GOVERNOR ADDITIONS */
-class i_thd: public ilink
-{
- public:
-   THD* ptr;
-   i_thd():ptr(0) { }
-   i_thd(THD* s) : ptr(s) {}
-};
-
 /* needed for linked list of two strings for replicate-rewrite-db */
 class i_string_pair: public ilink
 {
@@ -820,6 +811,5 @@ list_copy_and_replace_each_value(List<T> &list, MEM_ROOT *mem_root)
 
 void free_list(I_List <i_string_pair> *list);
 void free_list(I_List <i_string> *list);
-void free_list(I_List <i_thd> *list);
 
 #endif // INCLUDES_MYSQL_SQL_LIST_H

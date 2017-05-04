@@ -286,8 +286,6 @@ bool st_select_lex_unit::prepare(THD *thd_arg, select_result *sel_result,
   {
     if (!(tmp_result= union_result= new select_union))
       goto err;
-    if (describe)
-      tmp_result= sel_result;
   }
   else
     tmp_result= sel_result;
@@ -895,6 +893,12 @@ bool st_select_lex_unit::cleanup()
       join->tables_list= 0;
       join->table_count= 0;
       join->top_join_tab_count= 0;
+      if (join->tmp_join && join->tmp_join != join)
+      {
+        join->tmp_join->tables_list= 0;
+        join->tmp_join->table_count= 0;
+        join->tmp_join->top_join_tab_count= 0;
+      }
     }
     error|= fake_select_lex->cleanup();
     /*
@@ -1029,7 +1033,6 @@ bool st_select_lex::cleanup()
   {
     error= (bool) ((uint) error | (uint) lex_unit->cleanup());
   }
-  non_agg_fields.empty();
   inner_refs_list.empty();
   exclude_from_table_unique_test= FALSE;
   DBUG_RETURN(error);
@@ -1040,6 +1043,7 @@ void st_select_lex::cleanup_all_joins(bool full)
 {
   SELECT_LEX_UNIT *unit;
   SELECT_LEX *sl;
+  DBUG_ENTER("st_select_lex::cleanup_all_joins");
 
   if (join)
     join->cleanup(full);
@@ -1047,6 +1051,7 @@ void st_select_lex::cleanup_all_joins(bool full)
   for (unit= first_inner_unit(); unit; unit= unit->next_unit())
     for (sl= unit->first_select(); sl; sl= sl->next_select())
       sl->cleanup_all_joins(full);
+  DBUG_VOID_RETURN;
 }
 
 

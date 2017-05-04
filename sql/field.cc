@@ -355,7 +355,7 @@ static enum_field_types field_types_merge_rules [FIELDTYPE_NUM][FIELDTYPE_NUM]=
   //MYSQL_TYPE_NULL         MYSQL_TYPE_TIMESTAMP
     MYSQL_TYPE_LONGLONG,    MYSQL_TYPE_VARCHAR,
   //MYSQL_TYPE_LONGLONG     MYSQL_TYPE_INT24
-    MYSQL_TYPE_LONGLONG,    MYSQL_TYPE_LONG,
+    MYSQL_TYPE_LONGLONG,    MYSQL_TYPE_LONGLONG,
   //MYSQL_TYPE_DATE         MYSQL_TYPE_TIME
     MYSQL_TYPE_VARCHAR,     MYSQL_TYPE_VARCHAR,
   //MYSQL_TYPE_DATETIME     MYSQL_TYPE_YEAR
@@ -1269,12 +1269,15 @@ void Field_num::prepend_zeros(String *value)
   int diff;
   if ((diff= (int) (field_length - value->length())) > 0)
   {
-    bmove_upp((uchar*) value->ptr()+field_length,
-              (uchar*) value->ptr()+value->length(),
-	      value->length());
-    bfill((uchar*) value->ptr(),diff,'0');
-    value->length(field_length);
-    (void) value->c_ptr_quick();		// Avoid warnings in purify
+    const bool error= value->realloc(field_length);
+    if (!error)
+    {
+      bmove_upp((uchar*) value->ptr()+field_length,
+                (uchar*) value->ptr()+value->length(),
+	        value->length());
+      bfill((uchar*) value->ptr(),diff,'0');
+      value->length(field_length);
+    }
   }
 }
 
@@ -1816,6 +1819,7 @@ Field_str::Field_str(uchar *ptr_arg,uint32 len_arg, uchar *null_ptr_arg,
   if (charset_arg->state & MY_CS_BINSORT)
     flags|=BINARY_FLAG;
   field_derivation= DERIVATION_IMPLICIT;
+  field_repertoire= my_charset_repertoire(charset_arg);
 }
 
 
@@ -6500,21 +6504,29 @@ String *Field_string::val_str(String *val_buffer __attribute__((unused)),
 }
 
 
-my_decimal *Field_string::val_decimal(my_decimal *decimal_value)
+my_decimal *Field_longstr::val_decimal_from_str(const char *str,
+                                                uint length,
+                                                CHARSET_INFO *cs,
+                                                my_decimal *decimal_value)
 {
-  ASSERT_COLUMN_MARKED_FOR_READ;
-  int err= str2my_decimal(E_DEC_FATAL_ERROR, (char*) ptr, field_length,
-                          charset(), decimal_value);
+  int err= str2my_decimal(E_DEC_FATAL_ERROR, str, length, cs, decimal_value);
   if (!get_thd()->no_errors && err)
   {
-    ErrConvString errmsg((char*) ptr, field_length, charset());
+    ErrConvString errmsg(str, length, cs);
     push_warning_printf(current_thd, Sql_condition::WARN_LEVEL_WARN,
                         ER_TRUNCATED_WRONG_VALUE, 
                         ER(ER_TRUNCATED_WRONG_VALUE),
                         "DECIMAL", errmsg.ptr());
   }
-
   return decimal_value;
+}
+
+
+my_decimal *Field_string::val_decimal(my_decimal *decimal_value)
+{
+  ASSERT_COLUMN_MARKED_FOR_READ;
+  return val_decimal_from_str((const char *) ptr, field_length,
+                              Field_string::charset(), decimal_value);
 }
 
 
@@ -6942,18 +6954,9 @@ String *Field_varstring::val_str(String *val_buffer __attribute__((unused)),
 my_decimal *Field_varstring::val_decimal(my_decimal *decimal_value)
 {
   ASSERT_COLUMN_MARKED_FOR_READ;
-  CHARSET_INFO *cs= charset();
   uint length= length_bytes == 1 ? (uint) *ptr : uint2korr(ptr);
-  int error= str2my_decimal(E_DEC_FATAL_ERROR, (char*) ptr+length_bytes, length,
-                 cs, decimal_value);
-
-  if (!get_thd()->no_errors && error)
-  {
-    push_numerical_conversion_warning(current_thd, (char*)ptr+length_bytes, 
-                                      length, cs, "DECIMAL", 
-                                      ER_TRUNCATED_WRONG_VALUE); 
-  }
-  return decimal_value;
+  return val_decimal_from_str((const char *) ptr + length_bytes, length,
+                              Field_varstring::charset(), decimal_value);
 }
 
 
@@ -7317,6 +7320,35 @@ uint32 Field_blob::get_length(const uchar *pos, uint packlength_arg)
 }
 
 
+/**
+  Copy a value from another BLOB field of the same character set.
+  This method is used by Copy_field, e.g. during ALTER TABLE.
+*/
+int Field_blob::copy_value(Field_blob *from)
+{
+  DBUG_ASSERT(field_charset == from->charset());
+  int rc= 0;
+  uint32 length= from->get_length();
+  uchar *data;
+  from->get_ptr(&data);
+  if (packlength < from->packlength)
+  {
+    int well_formed_errors;
+    set_if_smaller(length, Field_blob::max_data_length());
+    length= field_charset->cset->well_formed_len(field_charset,
+                                                 (const char *) data,
+                                                 (const char *) data + length,
+                                                 length, &well_formed_errors);
+    rc= report_if_important_data((const char *) data + length,
+                                 (const char *) data + from->get_length(),
+                                 true);
+  }
+  store_length(length);
+  bmove(ptr + packlength, (uchar*) &data, sizeof(char*));
+  return rc;
+}
+
+
 int Field_blob::store(const char *from,uint length,CHARSET_INFO *cs)
 {
   ASSERT_COLUMN_MARKED_FOR_WRITE_OR_COMPUTED;
@@ -7474,9 +7506,8 @@ my_decimal *Field_blob::val_decimal(my_decimal *decimal_value)
   else
     length= get_length(ptr);
 
-  str2my_decimal(E_DEC_FATAL_ERROR, blob, length, charset(),
-                 decimal_value);
-  return decimal_value;
+  return val_decimal_from_str(blob, length,
+                              Field_blob::charset(), decimal_value);
 }
 
 

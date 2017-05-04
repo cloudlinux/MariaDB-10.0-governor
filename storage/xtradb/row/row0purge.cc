@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1997, 2013, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1997, 2016, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -69,7 +69,8 @@ row_purge_node_create(
 {
 	purge_node_t*	node;
 
-	ut_ad(parent && heap);
+	ut_ad(parent != NULL);
+	ut_ad(heap != NULL);
 
 	node = static_cast<purge_node_t*>(
 		mem_heap_zalloc(heap, sizeof(*node)));
@@ -84,7 +85,7 @@ row_purge_node_create(
 
 /***********************************************************//**
 Repositions the pcur in the purge node on the clustered index record,
-if found.
+if found. If the record is not found, close pcur.
 @return	TRUE if the record was found */
 static
 ibool
@@ -95,11 +96,10 @@ row_purge_reposition_pcur(
 	mtr_t*		mtr)	/*!< in: mtr */
 {
 	if (node->found_clust) {
-		ibool	found;
+		ut_ad(node->validate_pcur());
 
-		found = btr_pcur_restore_position(mode, &node->pcur, mtr);
+		node->found_clust = btr_pcur_restore_position(mode, &node->pcur, mtr);
 
-		return(found);
 	} else {
 		node->found_clust = row_search_on_row_ref(
 			&node->pcur, mode, node->table, node->ref, mtr);
@@ -109,6 +109,11 @@ row_purge_reposition_pcur(
 		}
 	}
 
+	/* Close the current cursor if we fail to position it correctly. */
+	if (!node->found_clust) {
+		btr_pcur_close(&node->pcur);
+	}
+
 	return(node->found_clust);
 }
 
@@ -116,7 +121,7 @@ row_purge_reposition_pcur(
 Removes a delete marked clustered index record if possible.
 @retval true if the row was not found, or it was successfully removed
 @retval false if the row was modified after the delete marking */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 bool
 row_purge_remove_clust_if_poss_low(
 /*===============================*/
@@ -182,7 +187,12 @@ func_exit:
 		mem_heap_free(heap);
 	}
 
-	btr_pcur_commit_specify_mtr(&node->pcur, &mtr);
+	/* Persistent cursor is closed if reposition fails. */
+	if (node->found_clust) {
+		btr_pcur_commit_specify_mtr(&node->pcur, &mtr);
+	} else {
+		mtr_commit(&mtr);
+	}
 
 	return(success);
 }
@@ -193,7 +203,7 @@ marking.
 @retval true if the row was not found, or it was successfully removed
 @retval false the purge needs to be suspended because of running out
 of file space. */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 bool
 row_purge_remove_clust_if_poss(
 /*===========================*/
@@ -251,7 +261,12 @@ row_purge_poss_sec(
 						 btr_pcur_get_rec(&node->pcur),
 						 &mtr, index, entry);
 
-	btr_pcur_commit_specify_mtr(&node->pcur, &mtr);
+	/* Persistent cursor is closed if reposition fails. */
+	if (node->found_clust) {
+		btr_pcur_commit_specify_mtr(&node->pcur, &mtr);
+	} else {
+		mtr_commit(&mtr);
+	}
 
 	return(can_delete);
 }
@@ -260,7 +275,7 @@ row_purge_poss_sec(
 Removes a secondary index entry if possible, by modifying the
 index tree.  Does not try to buffer the delete.
 @return	TRUE if success or if not found */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 ibool
 row_purge_remove_sec_if_poss_tree(
 /*==============================*/
@@ -382,7 +397,7 @@ Removes a secondary index entry without modifying the index tree,
 if possible.
 @retval	true if success or if not found
 @retval	false if row_purge_remove_sec_if_poss_tree() should be invoked */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 bool
 row_purge_remove_sec_if_poss_leaf(
 /*==============================*/
@@ -493,7 +508,7 @@ row_purge_remove_sec_if_poss_leaf(
 
 /***********************************************************//**
 Removes a secondary index entry if possible. */
-UNIV_INLINE __attribute__((nonnull(1,2)))
+UNIV_INLINE MY_ATTRIBUTE((nonnull(1,2)))
 void
 row_purge_remove_sec_if_poss(
 /*=========================*/
@@ -540,7 +555,7 @@ Purges a delete marking of a record.
 @retval true if the row was not found, or it was successfully removed
 @retval false the purge needs to be suspended because of
 running out of file space */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 bool
 row_purge_del_mark(
 /*===============*/
@@ -731,7 +746,8 @@ row_purge_parse_undo_rec(
 	ulint		info_bits;
 	ulint		type;
 
-	ut_ad(node && thr);
+	ut_ad(node != NULL);
+	ut_ad(thr != NULL);
 
 	ptr = trx_undo_rec_get_pars(
 		undo_rec, &type, &node->cmpl_info,
@@ -816,7 +832,7 @@ err_exit:
 /***********************************************************//**
 Purges the parsed record.
 @return true if purged, false if skipped */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 bool
 row_purge_record_func(
 /*==================*/
@@ -830,6 +846,8 @@ row_purge_record_func(
 {
 	dict_index_t*	clust_index;
 	bool		purged		= true;
+
+	ut_ad(!node->found_clust);
 
 	clust_index = dict_table_get_first_index(node->table);
 
@@ -879,7 +897,7 @@ row_purge_record_func(
 Fetches an undo log record and does the purge for the recorded operation.
 If none left, or the current purge completed, returns the control to the
 parent node, which is always a query thread node. */
-static __attribute__((nonnull))
+static
 void
 row_purge(
 /*======*/
@@ -986,3 +1004,52 @@ row_purge_step(
 
 	return(thr);
 }
+
+#ifdef UNIV_DEBUG
+/***********************************************************//**
+Validate the persisent cursor. The purge node has two references
+to the clustered index record - one via the ref member, and the
+other via the persistent cursor.  These two references must match
+each other if the found_clust flag is set.
+@return true if the stored copy of persistent cursor is consistent
+with the ref member.*/
+bool
+purge_node_t::validate_pcur()
+{
+	if (!found_clust) {
+		return(true);
+	}
+
+	if (index == NULL) {
+		return(true);
+	}
+
+	if (index->type == DICT_FTS) {
+		return(true);
+	}
+
+	if (pcur.old_stored != BTR_PCUR_OLD_STORED) {
+		return(true);
+	}
+
+	dict_index_t*   clust_index = pcur.btr_cur.index;
+
+	ulint*	offsets = rec_get_offsets(
+	pcur.old_rec, clust_index, NULL, pcur.old_n_fields, &heap);
+
+	/* Here we are comparing the purge ref record and the stored initial
+	part in persistent cursor. Both cases we store n_uniq fields of the
+	cluster index and so it is fine to do the comparison. We note this
+	dependency here as pcur and ref belong to different modules. */
+	int st = cmp_dtuple_rec(ref, pcur.old_rec, offsets);
+
+	if (st != 0) {
+		fprintf(stderr, "Purge node pcur validation failed\n");
+		dtuple_print(stderr, ref);
+		rec_print(stderr, pcur.old_rec, clust_index);
+		return(false);
+	}
+
+	return(true);
+}
+#endif /* UNIV_DEBUG */

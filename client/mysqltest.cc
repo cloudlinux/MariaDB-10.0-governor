@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2013, Monty Program Ab.
+   Copyright (c) 2009, 2016, Monty Program Ab.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -181,6 +181,7 @@ static uint my_end_arg= 0;
 static uint opt_tail_lines= 0;
 
 static uint opt_connect_timeout= 0;
+static uint opt_wait_for_pos_timeout= 0;
 
 static char delimiter[MAX_DELIMITER_LENGTH]= ";";
 static uint delimiter_length= 1;
@@ -1104,7 +1105,7 @@ void do_eval(DYNAMIC_STRING *query_eval, const char *query,
   Run query and dump the result to stderr in vertical format
 
   NOTE! This function should be safe to call when an error
-  has occured and thus any further errors will be ignored(although logged)
+  has occurred and thus any further errors will be ignored (although logged)
 
   SYNOPSIS
   show_query
@@ -1170,7 +1171,7 @@ static void show_query(MYSQL* mysql, const char* query)
   is added to the warning stack, only print @@warning_count-1 warnings.
 
   NOTE! This function should be safe to call when an error
-  has occured and this any further errors will be ignored(although logged)
+  has occurred and this any further errors will be ignored(although logged)
 
   SYNOPSIS
   show_warnings_before_error
@@ -1728,11 +1729,11 @@ int cat_file(DYNAMIC_STRING* ds, const char* filename)
   while((len= my_read(fd, (uchar*)&buff,
                       sizeof(buff)-1, MYF(0))) > 0)
   {
-    char *p= buff, *start= buff;
-    while (p < buff+len)
+    char *p= buff, *start= buff,*end=buff+len;
+    while (p < end)
     {
       /* Convert cr/lf to lf */
-      if (*p == '\r' && *(p+1) && *(p+1)== '\n')
+      if (*p == '\r' && p+1 < end && *(p+1)== '\n')
       {
         /* Add fake newline instead of cr and output the line */
         *p= '\n';
@@ -3340,6 +3341,8 @@ void do_exec(struct st_command *command)
   DBUG_ENTER("do_exec");
   DBUG_PRINT("enter", ("cmd: '%s'", cmd));
 
+  var_set_int("$sys_errno",0);
+
   /* Skip leading space */
   while (*cmd && my_isspace(charset_info, *cmd))
     cmd++;
@@ -3372,10 +3375,6 @@ void do_exec(struct st_command *command)
 #endif
 #endif
 
-  /* exec command is interpreted externally and will not take newlines */
-  while(replace(&ds_cmd, "\n", 1, " ", 1) == 0)
-    ;
-  
   DBUG_PRINT("info", ("Executing '%s' as '%s'",
                       command->first_argument, ds_cmd.str));
 
@@ -3394,16 +3393,32 @@ void do_exec(struct st_command *command)
     ds_result= &ds_sorted;
   }
 
+#ifdef _WIN32
+   /* Workaround for CRT bug, MDEV-9409 */
+  _setmode(fileno(res_file), O_BINARY);
+#endif
+
   while (fgets(buf, sizeof(buf), res_file))
   {
+    int len = (int)strlen(buf);
+#ifdef _WIN32
+    /* Strip '\r' off newlines. */
+    if (len > 1 && buf[len-2] == '\r' && buf[len-1] == '\n')
+    {
+      buf[len-2] = '\n';
+      buf[len-1] = 0;
+      len--;
+    }
+#endif
     if (disable_result_log)
     {
-      buf[strlen(buf)-1]=0;
+      if (len)
+        buf[len-1] = 0;
       DBUG_PRINT("exec_result",("%s", buf));
     }
     else
     {
-      replace_dynstr_append(ds_result, buf);
+      replace_dynstr_append_mem(ds_result, buf, len);
     }
   }
   error= pclose(res_file);
@@ -3444,6 +3459,7 @@ void do_exec(struct st_command *command)
         report_or_die("command \"%s\" failed with wrong error: %d",
                       command->first_argument, status);
     }
+    var_set_int("$sys_errno",status);
   }
   else if (command->expected_errors.err[0].type == ERR_ERRNO &&
            command->expected_errors.err[0].code.errnum != 0)
@@ -4659,7 +4675,7 @@ void do_sync_with_master2(struct st_command *command, long offset,
   MYSQL_ROW row;
   MYSQL *mysql= cur_con->mysql;
   char query_buf[FN_REFLEN+128];
-  int timeout= 300; /* seconds */
+  int timeout= opt_wait_for_pos_timeout;
 
   if (!master_pos.file[0])
     die("Calling 'sync_with_master' without calling 'save_master_pos'");
@@ -4701,7 +4717,7 @@ void do_sync_with_master2(struct st_command *command, long offset,
         master_pos_wait returned NULL. This indicates that
         slave SQL thread is not started, the slave's master
         information is not initialized, the arguments are
-        incorrect, or an error has occured
+        incorrect, or an error has occurred
       */
       die("%.*s failed: '%s' returned NULL "          \
           "indicating slave SQL thread failure",
@@ -5121,12 +5137,13 @@ static int my_kill(int pid, int sig)
 {
 #ifdef __WIN__
   HANDLE proc;
-  if ((proc= OpenProcess(PROCESS_TERMINATE, FALSE, pid)) == NULL)
+  if ((proc= OpenProcess(SYNCHRONIZE|PROCESS_TERMINATE, FALSE, pid)) == NULL)
     return -1;
   if (sig == 0)
   {
+    DWORD wait_result= WaitForSingleObject(proc, 0);
     CloseHandle(proc);
-    return 0;
+    return wait_result == WAIT_OBJECT_0?-1:0;
   }
   (void)TerminateProcess(proc, 201);
   CloseHandle(proc);
@@ -5246,7 +5263,7 @@ static st_error global_error_names[] =
 #include <my_base.h>
 static st_error handler_error_names[] =
 {
-  { "<No error>", -1U, "" },
+  { "<No error>", UINT_MAX, "" },
 #include <handler_ername.h>
   { 0, 0, 0 }
 };
@@ -5931,6 +5948,7 @@ void do_connect(struct st_command *command)
   my_bool con_shm __attribute__ ((unused))= 0;
   int read_timeout= 0;
   int write_timeout= 0;
+  int connect_timeout= 0;
   struct st_connection* con_slot;
 
   static DYNAMIC_STRING ds_connection_name;
@@ -6037,6 +6055,11 @@ void do_connect(struct st_command *command)
     {
       write_timeout= atoi(con_options + sizeof("write_timeout=")-1);
     }
+    else if (strncasecmp(con_options, "connect_timeout=",
+                         sizeof("connect_timeout=")-1) == 0)
+    {
+      connect_timeout= atoi(con_options + sizeof("connect_timeout=")-1);
+    }
     else
       die("Illegal option to connect: %.*s", 
           (int) (end - con_options), con_options);
@@ -6119,6 +6142,12 @@ void do_connect(struct st_command *command)
   {
     mysql_options(con_slot->mysql, MYSQL_OPT_WRITE_TIMEOUT,
                   (char*)&write_timeout);
+  }
+
+  if (connect_timeout)
+  {
+    mysql_options(con_slot->mysql, MYSQL_OPT_CONNECT_TIMEOUT,
+                  (char*)&connect_timeout);
   }
 
 #ifdef HAVE_SMEM
@@ -7097,6 +7126,10 @@ static struct my_option my_long_options[] =
    "Number of seconds before connection timeout.",
    &opt_connect_timeout, &opt_connect_timeout, 0, GET_UINT, REQUIRED_ARG,
    120, 0, 3600 * 12, 0, 0, 0},
+  {"wait_for_pos_timeout", 0,
+   "Number of seconds to wait for master_pos_wait",
+   &opt_wait_for_pos_timeout, &opt_wait_for_pos_timeout, 0, GET_UINT,
+   REQUIRED_ARG, 300, 0, 3600 * 12, 0, 0, 0},
   {"plugin_dir", 0, "Directory for client-side plugins.",
     &opt_plugin_dir, &opt_plugin_dir, 0,
    GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},

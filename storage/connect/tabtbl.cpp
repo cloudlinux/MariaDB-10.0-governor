@@ -1,11 +1,11 @@
 /************* TabTbl C++ Program Source Code File (.CPP) **************/
 /* PROGRAM NAME: TABTBL                                                */
 /* -------------                                                       */
-/*  Version 1.7                                                        */
+/*  Version 1.8                                                        */
 /*                                                                     */
 /* COPYRIGHT:                                                          */
 /* ----------                                                          */
-/*  (C) Copyright to PlugDB Software Development          2008-2015    */
+/*  (C) Copyright to PlugDB Software Development          2008-2017    */
 /*  Author: Olivier BERTRAND                                           */
 /*                                                                     */
 /* WHAT THIS PROGRAM DOES:                                             */
@@ -70,6 +70,7 @@
 #include "tabcol.h"
 #include "tabdos.h"      // TDBDOS and DOSCOL class dcls
 #include "tabtbl.h"
+#include "tabext.h"
 #include "tabmysql.h"
 #include "ha_connect.h"
 
@@ -130,10 +131,10 @@ bool TBLDEF::DefineAM(PGLOBAL g, LPCSTR, int)
 
       // Allocate the TBLIST block for that table
       tbl = new(g) XTAB(pn, def);
-      tbl->SetQualifier(pdb);
+      tbl->SetSchema(pdb);
       
       if (trace)
-        htrc("TBL: Name=%s db=%s\n", tbl->GetName(), tbl->GetQualifier());
+        htrc("TBL: Name=%s db=%s\n", tbl->GetName(), tbl->GetSchema());
 
       // Link the blocks
       if (Tablep)
@@ -411,9 +412,9 @@ void TDBTBL::ResetDB(void)
       colp->COLBLK::Reset();
 
   for (PTABLE tabp = Tablist; tabp; tabp = tabp->GetNext())
-    ((PTDBASE)tabp->GetTo_Tdb())->ResetDB();
+    tabp->GetTo_Tdb()->ResetDB();
 
-  Tdbp = (PTDBASE)Tablist->GetTo_Tdb();
+  Tdbp = Tablist->GetTo_Tdb();
   Crp = 0;
   } // end of ResetDB
 
@@ -458,7 +459,7 @@ bool TDBTBL::OpenDB(PGLOBAL g)
     return TRUE;
 
   if ((CurTable = Tablist)) {
-    Tdbp = (PTDBASE)CurTable->GetTo_Tdb();
+    Tdbp = CurTable->GetTo_Tdb();
 //  Tdbp->SetMode(Mode);
 //  Tdbp->ResetDB();
 //  Tdbp->ResetSize();
@@ -515,7 +516,7 @@ int TDBTBL::ReadDB(PGLOBAL g)
         /*  Continue reading from next table file.                     */
         /***************************************************************/
         Tdbp->CloseDB(g);
-        Tdbp = (PTDBASE)CurTable->GetTo_Tdb();
+        Tdbp = CurTable->GetTo_Tdb();
 
         // Check and initialize the subtable columns
         for (PCOL cp = Columns; cp; cp = cp->GetNext())
@@ -569,6 +570,9 @@ pthread_handler_t ThreadOpen(void *p)
   if (!my_thread_init()) {
     set_current_thd(cmp->Thd);
 
+		if (trace)
+			htrc("ThreadOpen: Thd=%d\n", cmp->Thd);
+
     // Try to open the connection
     if (!cmp->Tap->GetTo_Tdb()->OpenDB(cmp->G)) {
       cmp->Ready = true;
@@ -604,10 +608,15 @@ void TDBTBM::ResetDB(void)
     if (colp->GetAmType() == TYPE_AM_TABID)
       colp->COLBLK::Reset();
 
+	// Local tables
   for (PTABLE tabp = Tablist; tabp; tabp = tabp->GetNext())
-    ((PTDBASE)tabp->GetTo_Tdb())->ResetDB();
+    tabp->GetTo_Tdb()->ResetDB();
 
-  Tdbp = (PTDBASE)Tablist->GetTo_Tdb();
+	// Remote tables
+	for (PTBMT tp = Tmp; tp; tp = tp->Next)
+		tp->Tap->GetTo_Tdb()->ResetDB();
+
+  Tdbp = (Tablist) ? Tablist->GetTo_Tdb() : NULL;
   Crp = 0;
   } // end of ResetDB
 
@@ -679,7 +688,7 @@ bool TDBTBM::OpenDB(PGLOBAL g)
     /*  Table already open, replace it at its beginning.               */
     /*******************************************************************/
     ResetDB();
-    return Tdbp->OpenDB(g);  // Re-open fist table
+    return (Tdbp) ? Tdbp->OpenDB(g) : false;  // Re-open fist table
     } // endif use
 
 #if 0
@@ -708,7 +717,7 @@ bool TDBTBM::OpenDB(PGLOBAL g)
   /*  Proceed with local tables.                                       */
   /*********************************************************************/
   if ((CurTable = Tablist)) {
-    Tdbp = (PTDBASE)CurTable->GetTo_Tdb();
+    Tdbp = CurTable->GetTo_Tdb();
 //  Tdbp->SetMode(Mode);
 
     // Check and initialize the subtable columns
@@ -800,7 +809,7 @@ int TDBTBM::ReadNextRemote(PGLOBAL g)
 
     } // endif Curtable
 
-  Tdbp = (PTDBASE)Cmp->Tap->GetTo_Tdb();
+  Tdbp = Cmp->Tap->GetTo_Tdb();
 
   // Check and initialize the subtable columns
   for (PCOL cp = Columns; cp; cp = cp->GetNext())

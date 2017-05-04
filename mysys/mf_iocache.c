@@ -507,6 +507,7 @@ int _my_b_read(register IO_CACHE *info, uchar *Buffer, size_t Count)
     {
       /* End of file. Return, what we did copy from the buffer. */
       info->error= (int) left_length;
+      info->seek_not_done=1;
       DBUG_RETURN(1);
     }
     /*
@@ -524,6 +525,7 @@ int _my_b_read(register IO_CACHE *info, uchar *Buffer, size_t Count)
       */
       info->error= (read_length == (size_t) -1 ? -1 :
 		    (int) (read_length+left_length));
+      info->seek_not_done=1;
       DBUG_RETURN(1);
     }
     Count-=length;
@@ -572,6 +574,7 @@ int _my_b_read(register IO_CACHE *info, uchar *Buffer, size_t Count)
     /* For a read error, return -1, otherwise, what we got in total. */
     info->error= length == (size_t) -1 ? -1 : (int) (length+left_length);
     info->read_pos=info->read_end=info->buffer;
+    info->seek_not_done=1;
     DBUG_RETURN(1);
   }
   /*
@@ -1812,6 +1815,7 @@ int my_b_flush_io_cache(IO_CACHE *info,
     It's currently safe to call this if one has called init_io_cache()
     on the 'info' object, even if init_io_cache() failed.
     This function is also safe to call twice with the same handle.
+    Note that info->file is not reset as the caller may still use ut for my_close()
 
   RETURN
    0  ok
@@ -1847,10 +1851,12 @@ int end_io_cache(IO_CACHE *info)
   if (info->type == SEQ_READ_APPEND)
   {
     /* Destroy allocated mutex */
-    info->type= TYPE_NOT_SET;
     mysql_mutex_destroy(&info->append_buffer_lock);
   }
   info->share= 0;
+  info->type= TYPE_NOT_SET;                  /* Ensure that flush_io_cache() does nothing */
+  info->write_end= 0;                        /* Ensure that my_b_write() fails */
+  info->write_function= 0;                   /* my_b_write will crash if used */
   DBUG_RETURN(error);
 } /* end_io_cache */
 
@@ -1870,6 +1876,7 @@ void die(const char* fmt, ...)
   fprintf(stderr,"Error:");
   vfprintf(stderr, fmt,va_args);
   fprintf(stderr,", errno=%d\n", errno);
+  va_end(va_args);
   exit(1);
 }
 

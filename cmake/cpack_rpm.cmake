@@ -32,8 +32,9 @@ SET(CPACK_RPM_PACKAGE_NAME "MariaDB")
 SET(CPACK_PACKAGE_FILE_NAME "${CPACK_RPM_PACKAGE_NAME}-${VERSION}-${RPM}-${CMAKE_SYSTEM_PROCESSOR}")
 
 SET(CPACK_RPM_PACKAGE_RELEASE "1%{?dist}")
-SET(CPACK_RPM_PACKAGE_LICENSE "GPL")
+SET(CPACK_RPM_PACKAGE_LICENSE "GPLv2")
 SET(CPACK_RPM_PACKAGE_RELOCATABLE FALSE)
+SET(CPACK_PACKAGE_RELOCATABLE FALSE)
 SET(CPACK_RPM_PACKAGE_GROUP "Applications/Databases")
 SET(CPACK_RPM_PACKAGE_URL "http://mariadb.org")
 SET(CPACK_RPM_PACKAGE_SUMMARY "MariaDB: a very fast and robust SQL database server")
@@ -42,8 +43,8 @@ SET(CPACK_RPM_PACKAGE_DESCRIPTION "${CPACK_RPM_PACKAGE_SUMMARY}
 It is GPL v2 licensed, which means you can use the it free of charge under the
 conditions of the GNU General Public License Version 2 (http://www.gnu.org/licenses/).
 
-MariaDB documentation can be found at http://kb.askmonty.org/
-MariaDB bug reports should be submitted through https://mariadb.atlassian.net/
+MariaDB documentation can be found at https://mariadb.com/kb
+MariaDB bug reports should be submitted through https://jira.mariadb.org 
 
 ")
 
@@ -219,6 +220,9 @@ SETA(CPACK_RPM_test_PACKAGE_PROVIDES
   "perl(mtr_io.pl)"
   "perl(mtr_match)"
   "perl(mtr_misc.pl)"
+  "perl(mtr_gcov.pl)"
+  "perl(mtr_gprof.pl)"
+  "perl(mtr_process.pl)"
   "perl(mtr_report)"
   "perl(mtr_results)"
   "perl(mtr_unique)")

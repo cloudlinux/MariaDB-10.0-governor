@@ -1,11 +1,11 @@
 /************ TabPivot C++ Program Source Code File (.CPP) *************/
 /* PROGRAM NAME: TABPIVOT                                              */
 /* -------------                                                       */
-/*  Version 1.6                                                        */
+/*  Version 1.7                                                        */
 /*                                                                     */
 /* COPYRIGHT:                                                          */
 /* ----------                                                          */
-/*  (C) Copyright to the author Olivier BERTRAND          2005-2015    */
+/*  (C) Copyright to the author Olivier BERTRAND          2005-2017    */
 /*                                                                     */
 /* WHAT THIS PROGRAM DOES:                                             */
 /* -----------------------                                             */
@@ -41,6 +41,7 @@
 #include "global.h"
 #include "plgdbsem.h"
 #include "xtable.h"
+#include "tabext.h"
 #include "tabcol.h"
 #include "colblk.h"
 #include "tabmysql.h"
@@ -348,7 +349,7 @@ bool PIVOTDEF::DefineAM(PGLOBAL g, LPCSTR am, int poff)
     return TRUE;
 
   Tabname = (char*)Tablep->GetName();
-  DB = (char*)Tablep->GetQualifier();
+  DB = (char*)Tablep->GetSchema();
   Tabsrc = (char*)Tablep->GetSrc();
 
   Host = GetStringCatInfo(g, "Host", "localhost");
@@ -529,7 +530,7 @@ bool TDBPIVOT::GetSourceTable(PGLOBAL g)
     // Get the new table description block of this source table
     PTABLE tablep = new(g) XTAB("whatever", Tabsrc);
 
-    tablep->SetQualifier(Database);
+    tablep->SetSchema(Database);
 
     if (!(Tdbp = GetSubTable(g, tablep, true)))
       return true;
@@ -883,7 +884,7 @@ SRCCOL::SRCCOL(PCOLDEF cdp, PTDB tdbp, PCOL cprec, int n)
 /***********************************************************************/
 /*  Initialize the column as pointing to the source column.            */
 /***********************************************************************/
-bool SRCCOL::Init(PGLOBAL g, PTDBASE tp)
+bool SRCCOL::Init(PGLOBAL g, PTDB tp)
   {
   if (PRXCOL::Init(g, tp))
     return true;

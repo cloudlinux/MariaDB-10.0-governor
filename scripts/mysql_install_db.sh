@@ -202,8 +202,10 @@ cannot_find_file()
   fi
 
   echo
-  echo "If you compiled from source, you need to run 'make install' to"
+  echo "If you compiled from source, you need to either run 'make install' to"
   echo "copy the software into the correct location ready for operation."
+  echo "If you don't want to do a full install, you can use the --srcddir"
+  echo "option to only install the mysql database and privilege tables"
   echo
   echo "If you are using a binary release, you must either be at the top"
   echo "level of the extracted archive, or pass the --basedir option"
@@ -214,7 +216,7 @@ cannot_find_file()
 # Ok, let's go.  We first need to parse arguments which are required by
 # my_print_defaults so that we can execute it first, then later re-parse
 # the command line to add any extra bits that we need.
-parse_arguments PICK-ARGS-FROM-ARGV "$@"
+parse_arguments "$@"
 
 #
 # We can now find my_print_defaults.  This script supports:
@@ -280,16 +282,16 @@ then
     cannot_find_file mysqld $basedir/libexec $basedir/sbin $basedir/bin
     exit 1
   fi
-  langdir=`find_in_basedir --dir errmsg.sys share/english @INSTALL_MYSQLSHAREDIR@/english`
+  langdir=`find_in_basedir --dir errmsg.sys share/english share/mysql/english`
   if test -z "$langdir"
   then
-    cannot_find_file errmsg.sys $basedir/share/english $basedir/@INSTALL_MYSQLSHAREDIR@/english
+    cannot_find_file errmsg.sys $basedir/share/english $basedir/share/mysql/english
     exit 1
   fi
-  pkgdatadir=`find_in_basedir --dir fill_help_tables.sql share @INSTALL_MYSQLSHAREDIR@`
+  pkgdatadir=`find_in_basedir --dir fill_help_tables.sql share share/mysql`
   if test -z "$pkgdatadir"
   then
-    cannot_find_file fill_help_tables.sql $basedir/share $basedir/@INSTALL_MYSQLSHAREDIR@
+    cannot_find_file fill_help_tables.sql $basedir/share $basedir/share/mysql
     exit 1
   fi
   scriptdir="$basedir/scripts"
@@ -372,7 +374,7 @@ then
 fi
 
 # Create database directories
-for dir in "$ldata" "$ldata/mysql"
+for dir in "$ldata" "$ldata/mysql" "$ldata/test"
 do
   if test ! -d "$dir"
   then
@@ -511,10 +513,8 @@ then
   echo "The latest information about MariaDB is available at http://mariadb.org/."
   echo "You can find additional information about the MySQL part at:"
   echo "http://dev.mysql.com"
-  echo "Support MariaDB development by buying support/new features from MariaDB"
-  echo "Corporation Ab. You can contact us about this at sales@mariadb.com."
-  echo "Alternatively consider joining our community based development effort:"
-  echo "http://mariadb.com/kb/en/contributing-to-the-mariadb-project/"
+  echo "Consider joining MariaDB's strong and vibrant community:"
+  echo "https://mariadb.org/get-involved/"
   echo
 fi
 

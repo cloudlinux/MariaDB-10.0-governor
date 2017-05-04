@@ -383,6 +383,7 @@ int decimal2string(const decimal_t *from, char *to, int *to_len,
     }
     else
       frac-=j;
+    frac_len= frac;
     len= from->sign + intg_len + MY_TEST(frac) + frac_len;
   }
   *to_len=len;
@@ -927,6 +928,8 @@ internal_str2dec(const char *from, decimal_t *to, char **end, my_bool fixed)
         error= decimal_shift(to, (int) exponent);
     }
   }
+  if (to->sign && decimal_is_zero(to))
+    to->sign= 0;
   return error;
 
 fatal_error:

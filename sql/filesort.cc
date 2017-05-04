@@ -25,7 +25,6 @@
 #include <my_global.h>
 #include "sql_priv.h"
 #include "filesort.h"
-#include "unireg.h"                      // REQUIRED by other includes
 #ifdef HAVE_STDDEF_H
 #include <stddef.h>			/* for macro offsetof */
 #endif
@@ -1630,7 +1629,7 @@ int merge_buffers(Sort_param *param, IO_CACHE *from_file,
       if (!(error= (int) read_to_buffer(from_file, buffpek,
                                         rec_length)))
       {
-        queue_remove(&queue,0);
+        (void) queue_remove_top(&queue);
         reuse_freed_buff(&queue, buffpek, rec_length);
       }
       else if (error == -1)

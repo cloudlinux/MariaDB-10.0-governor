@@ -1,6 +1,6 @@
 /*
-   Copyright (c) 2000, 2014, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2014, SkySQL Ab.
+   Copyright (c) 2000, 2016, Oracle and/or its affiliates.
+   Copyright (c) 2010, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -78,6 +78,81 @@ class READ_INFO {
   IO_CACHE cache;
   NET *io_net;
   int level; /* for load xml */
+
+
+#if MYSQL_VERSION_ID >= 100200
+#error This 10.0 and 10.1 specific fix should be removed in 10.2.
+#error Fix read_mbtail() to use my_charlen() instead of my_charlen_tmp()
+#else
+  int my_charlen_tmp(CHARSET_INFO *cs, const char *str, const char *end)
+  {
+    my_wc_t wc;
+    return cs->cset->mb_wc(cs, &wc, (const uchar *) str, (const uchar *) end);
+  }
+
+  /**
+    Read a tail of a multi-byte character.
+    The first byte of the character is assumed to be already
+    read from the file and appended to "str".
+
+    @returns  true  - if EOF happened unexpectedly
+    @returns  false - no EOF happened: found a good multi-byte character,
+                                       or a bad byte sequence
+
+    Note:
+    The return value depends only on EOF:
+    - read_mbtail() returns "false" is a good character was read, but also
+    - read_mbtail() returns "false" if an incomplete byte sequence was found
+      and no EOF happened.
+
+    For example, suppose we have an ujis file with bytes 0x8FA10A, where:
+    - 0x8FA1 is an incomplete prefix of a 3-byte character
+      (it should be [8F][A1-FE][A1-FE] to make a full 3-byte character)
+    - 0x0A is a line demiliter
+    This file has some broken data, the trailing [A1-FE] is missing.
+
+    In this example it works as follows:
+    - 0x8F is read from the file and put into "data" before the call
+      for read_mbtail()
+    - 0xA1 is read from the file and put into "data" by read_mbtail()
+    - 0x0A is kept in the read queue, so the next read iteration after
+      the current read_mbtail() call will normally find it and recognize as
+      a line delimiter
+    - the current call for read_mbtail() returns "false",
+      because no EOF happened
+  */
+  bool read_mbtail(String *str)
+  {
+    int chlen;
+    if ((chlen= my_charlen_tmp(read_charset, str->end() - 1, str->end())) == 1)
+      return false; // Single byte character found
+    for (uint32 length0= str->length() - 1 ; MY_CS_IS_TOOSMALL(chlen); )
+    {
+      int chr= GET;
+      if (chr == my_b_EOF)
+      {
+        DBUG_PRINT("info", ("read_mbtail: chlen=%d; unexpected EOF", chlen));
+        return true; // EOF
+      }
+      str->append(chr);
+      chlen= my_charlen_tmp(read_charset, str->ptr() + length0, str->end());
+      if (chlen == MY_CS_ILSEQ)
+      {
+        /**
+          It has been an incomplete (but a valid) sequence so far,
+          but the last byte turned it into a bad byte sequence.
+          Unget the very last byte.
+        */
+        str->length(str->length() - 1);
+        PUSH(chr);
+        DBUG_PRINT("info", ("read_mbtail: ILSEQ"));
+        return false; // Bad byte sequence
+      }
+    }
+    DBUG_PRINT("info", ("read_mbtail: chlen=%d", chlen));
+    return false; // Good multi-byte character
+  }
+#endif
 
 public:
   bool error,line_cuted,found_null,enclosed;
@@ -255,6 +330,7 @@ int mysql_load(THD *thd,sql_exchange *ex,TABLE_LIST *table_list,
   {
     DBUG_RETURN(TRUE);
   }
+  thd_proc_info(thd, "executing");
   /*
     Let us emit an error if we are loading data to table which is used
     in subselect in SET clause like we do it for INSERT.
@@ -313,6 +389,18 @@ int mysql_load(THD *thd,sql_exchange *ex,TABLE_LIST *table_list,
 
   table->prepare_triggers_for_insert_stmt_or_event();
   table->mark_columns_needed_for_insert();
+
+  if (table->vfield)
+  {
+    for (Field **vfield_ptr= table->vfield; *vfield_ptr; vfield_ptr++)
+    {
+      if ((*vfield_ptr)->stored_in_db)
+      {
+        thd->lex->unit.insert_table_with_stored_vcol= table;
+        break;
+      }
+    }
+  }
 
   uint tot_length=0;
   bool use_blobs= 0, use_vars= 0;
@@ -508,7 +596,8 @@ int mysql_load(THD *thd,sql_exchange *ex,TABLE_LIST *table_list,
 			    *enclosed, skip_lines, ignore);
 
     thd_proc_info(thd, "End bulk insert");
-    thd_progress_next_stage(thd);
+    if (!error)
+      thd_progress_next_stage(thd);
     if (thd->locked_tables_mode <= LTM_LOCK_TABLES &&
         table->file->ha_end_bulk_insert() && !error)
     {
@@ -1392,8 +1481,8 @@ READ_INFO::READ_INFO(File file_par, uint tot_length, CHARSET_INFO *cs,
   set_if_bigger(length,line_start.length());
   stack=stack_pos=(int*) sql_alloc(sizeof(int)*length);
 
-  if (!(buffer=(uchar*) my_malloc(buff_length+1,MYF(MY_THREAD_SPECIFIC))))
-    error=1; /* purecov: inspected */
+  if (!(buffer=(uchar*) my_malloc(buff_length+1,MYF(MY_WME | MY_THREAD_SPECIFIC))))
+    error= 1; /* purecov: inspected */
   else
   {
     end_of_buff=buffer+buff_length;
@@ -1460,6 +1549,54 @@ inline int READ_INFO::terminator(const uchar *ptr,uint length)
 }
 
 
+/**
+  Read a field.
+
+  The data in the loaded file was presumably escaped using
+  - either select_export::send_data() OUTFILE
+  - or mysql_real_escape_string()
+  using the same character set with the one specified in the current
+  "LOAD DATA INFILE ... CHARACTER SET ..." (or the default LOAD character set).
+
+  Note, non-escaped multi-byte characters are scanned as a single entity.
+  This is needed to correctly distinguish between:
+  - 0x5C as an escape character versus
+  - 0x5C as the second byte in a multi-byte sequence (big5, cp932, gbk, sjis)
+
+  Parts of escaped multi-byte characters are scanned on different loop
+  iterations. See the comment about 0x5C handling in select_export::send_data()
+  in sql_class.cc.
+
+  READ_INFO::read_field() does not check wellformedness.
+  Raising wellformedness errors or warnings in READ_INFO::read_field()
+  would be wrong, as the data after unescaping can go into a BLOB field,
+  or into a TEXT/VARCHAR field of a different character set.
+  The loop below only makes sure to revert escaping made by
+  select_export::send_data() or mysql_real_escape_string().
+  Wellformedness is checked later, during Field::store(str,length,cs) time.
+
+  Note, in some cases users can supply data which did not go through
+  escaping properly. For example, utf8 "\<C3><A4>"
+  (backslash followed by LATIN SMALL LETTER A WITH DIAERESIS)
+  is improperly escaped data that could not be generated by
+  select_export::send_data() / mysql_real_escape_string():
+  - either there should be two backslashes:   "\\<C3><A4>"
+  - or there should be no backslashes at all: "<C3><A4>"
+  "\<C3>" and "<A4> are scanned on two different loop iterations and
+  store "<C3><A4>" into the field.
+
+  Note, adding useless escapes before multi-byte characters like in the
+  example above is safe in case of utf8, but is not safe in case of
+  character sets that have escape_with_backslash_is_dangerous==TRUE,
+  such as big5, cp932, gbk, sjis. This can lead to mis-interpretation of the
+  data. Suppose we have a big5 character "<EE><5C>" followed by <30> (digit 0).
+  If we add an extra escape before this sequence, then we'll get
+  <5C><EE><5C><30>. The first loop iteration will turn <5C><EE> into <EE>.
+  The second loop iteration will turn <5C><30> into <30>.
+  So the program that generates a dump file for further use with LOAD DATA
+  must make sure to use escapes properly.
+*/
+
 int READ_INFO::read_field()
 {
   int chr,found_enclosed_char;
@@ -1496,7 +1633,8 @@ int READ_INFO::read_field()
 
   for (;;)
   {
-    while ( to < end_of_buff)
+    // Make sure we have enough space for the longest multi-byte character.
+    while ( to + read_charset->mbmaxlen < end_of_buff)
     {
       chr = GET;
       if (chr == my_b_EOF)
@@ -1584,45 +1722,33 @@ int READ_INFO::read_field()
 	}
       }
 #ifdef USE_MB
-      if (my_mbcharlen(read_charset, chr) > 1 &&
-          to + my_mbcharlen(read_charset, chr) <= end_of_buff)
-      {
-        uchar* p= to;
-        int ml, i;
-        *to++ = chr;
-
-        ml= my_mbcharlen(read_charset, chr);
-
-        for (i= 1; i < ml; i++) 
-        {
-          chr= GET;
-          if (chr == my_b_EOF)
-          {
-            /*
-             Need to back up the bytes already ready from illformed
-             multi-byte char 
-            */
-            to-= i;
-            goto found_eof;
-          }
-          *to++ = chr;
-        }
-        if (my_ismbchar(read_charset,
-                        (const char *)p,
-                        (const char *)to))
-          continue;
-        for (i= 0; i < ml; i++)
-          PUSH(*--to);
-        chr= GET;
-      }
 #endif
       *to++ = (uchar) chr;
+#if MYSQL_VERSION_ID >= 100200
+#error This 10.0 and 10.1 specific fix should be removed in 10.2
+#else
+      if (my_mbcharlen(read_charset, (uchar) chr) > 1)
+      {
+        /*
+          A known MBHEAD found. Try to scan the full multi-byte character.
+          Otherwise, a possible following second byte 0x5C would be
+          mis-interpreted as an escape on the next iteration.
+          (Important for big5, gbk, sjis, cp932).
+        */
+        String tmp((char *) to - 1, read_charset->mbmaxlen, read_charset);
+        tmp.length(1);
+        bool eof= read_mbtail(&tmp);
+        to+= tmp.length() - 1;
+        if (eof)
+          goto found_eof;
+      }
+#endif
     }
     /*
     ** We come here if buffer is too small. Enlarge it and continue
     */
     if (!(new_buffer=(uchar*) my_realloc((char*) buffer,buff_length+1+IO_SIZE,
-					MYF(MY_WME | MY_THREAD_SPECIFIC))))
+                                         MYF(MY_WME | MY_THREAD_SPECIFIC))))
       return (error=1);
     to=new_buffer + (to-buffer);
     buffer=new_buffer;
@@ -2016,8 +2142,15 @@ int READ_INFO::read_xml()
       break;
       
     case '/': /* close tag */
-      level--;
       chr= my_tospace(GET);
+      /* Decrease the 'level' only when (i) It's not an */
+      /* (without space) empty tag i.e. <tag/> or, (ii) */
+      /* It is of format <row col="val" .../>           */
+      if(chr != '>' || in_tag)
+      {
+        level--;
+        in_tag= false;
+      }
       if(chr != '>')   /* if this is an empty tag <tag   /> */
         tag.length(0); /* we should keep tag value          */
       while(chr != '>' && chr != my_b_EOF)

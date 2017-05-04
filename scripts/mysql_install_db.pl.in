@@ -238,7 +238,7 @@ sub quote_options {
 ##############################################################################
 
 my $opt = {};
-parse_arguments($opt, 'PICK-ARGS-FROM-ARGV', @ARGV);
+parse_arguments($opt, @ARGV);
 
 # ----------------------------------------------------------------------
 # We can now find my_print_defaults.  This script supports:
@@ -318,7 +318,7 @@ elsif ( $opt->{basedir} )
                     find_in_basedir($opt,"file","mysqld-nt",
                                   "bin");  # ,"sql"
   $pkgdatadir     = find_in_basedir($opt,"dir","fill_help_tables.sql",
-                                    "share","@INSTALL_MYSQLSHAREDIR@");  # ,"scripts"
+                                    "share","share/mysql");  # ,"scripts"
   $scriptdir      = "$opt->{basedir}/scripts";
 }
 else

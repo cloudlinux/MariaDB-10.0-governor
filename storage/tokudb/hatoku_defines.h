@@ -1,103 +1,72 @@
 /* -*- mode: C++; c-basic-offset: 4; indent-tabs-mode: nil -*- */
 // vim: ft=cpp:expandtab:ts=8:sw=4:softtabstop=4:
 #ident "$Id$"
-/*
-COPYING CONDITIONS NOTICE:
+/*======
+This file is part of TokuDB
 
-  This program is free software; you can redistribute it and/or modify
-  it under the terms of version 2 of the GNU General Public License as
-  published by the Free Software Foundation, and provided that the
-  following conditions are met:
 
-      * Redistributions of source code must retain this COPYING
-        CONDITIONS NOTICE, the COPYRIGHT NOTICE (below), the
-        DISCLAIMER (below), the UNIVERSITY PATENT NOTICE (below), the
-        PATENT MARKING NOTICE (below), and the PATENT RIGHTS
-        GRANT (below).
+Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved.
 
-      * Redistributions in binary form must reproduce this COPYING
-        CONDITIONS NOTICE, the COPYRIGHT NOTICE (below), the
-        DISCLAIMER (below), the UNIVERSITY PATENT NOTICE (below), the
-        PATENT MARKING NOTICE (below), and the PATENT RIGHTS
-        GRANT (below) in the documentation and/or other materials
-        provided with the distribution.
+    TokuDB is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License, version 2,
+    as published by the Free Software Foundation.
 
-  You should have received a copy of the GNU General Public License
-  along with this program; if not, write to the Free Software
-  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
-  02110-1301, USA.
+    TokuDB is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
 
-COPYRIGHT NOTICE:
+    You should have received a copy of the GNU General Public License
+    along with TokuDB.  If not, see <http://www.gnu.org/licenses/>.
 
-  TokuDB, Tokutek Fractal Tree Indexing Library.
-  Copyright (C) 2007-2013 Tokutek, Inc.
+======= */
 
-DISCLAIMER:
+#ident "Copyright (c) 2006, 2015, Percona and/or its affiliates. All rights reserved."
 
-  This program is distributed in the hope that it will be useful, but
-  WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  General Public License for more details.
+#ifndef _HATOKU_DEFINES_H
+#define _HATOKU_DEFINES_H
 
-UNIVERSITY PATENT NOTICE:
+#include <my_config.h>
+#define MYSQL_SERVER 1
+#include "mysql_version.h"
+#include "sql_table.h"
+#include "handler.h"
+#include "table.h"
+#include "log.h"
+#include "sql_class.h"
+#include "sql_show.h"
+#include "discover.h"
+//#include <binlog.h>
+#include "debug_sync.h"
 
-  The technology is licensed by the Massachusetts Institute of
-  Technology, Rutgers State University of New Jersey, and the Research
-  Foundation of State University of New York at Stony Brook under
-  United States of America Serial No. 11/760379 and to the patents
-  and/or patent applications resulting from it.
+#undef PACKAGE
+#undef VERSION
+#undef HAVE_DTRACE
+#undef _DTRACE_VERSION
 
-PATENT MARKING NOTICE:
+/* We define DTRACE after mysql_priv.h in case it disabled dtrace in the main server */
+#ifdef HAVE_DTRACE
+#define _DTRACE_VERSION 1
+#else
+#endif
 
-  This software is covered by US Patent No. 8,185,551.
-  This software is covered by US Patent No. 8,489,638.
+#include <mysql/plugin.h>
 
-PATENT RIGHTS GRANT:
+#include <ctype.h>
+#include <stdint.h>
+#define __STDC_FORMAT_MACROS
+#include <inttypes.h>
+#if defined(_WIN32)
+#include "misc.h"
+#endif
 
-  "THIS IMPLEMENTATION" means the copyrightable works distributed by
-  Tokutek as part of the Fractal Tree project.
-
-  "PATENT CLAIMS" means the claims of patents that are owned or
-  licensable by Tokutek, both currently or in the future; and that in
-  the absence of this license would be infringed by THIS
-  IMPLEMENTATION or by using or running THIS IMPLEMENTATION.
-
-  "PATENT CHALLENGE" shall mean a challenge to the validity,
-  patentability, enforceability and/or non-infringement of any of the
-  PATENT CLAIMS or otherwise opposing any of the PATENT CLAIMS.
-
-  Tokutek hereby grants to you, for the term and geographical scope of
-  the PATENT CLAIMS, a non-exclusive, no-charge, royalty-free,
-  irrevocable (except as stated in this section) patent license to
-  make, have made, use, offer to sell, sell, import, transfer, and
-  otherwise run, modify, and propagate the contents of THIS
-  IMPLEMENTATION, where such license applies only to the PATENT
-  CLAIMS.  This grant does not include claims that would be infringed
-  only as a consequence of further modifications of THIS
-  IMPLEMENTATION.  If you or your agent or licensee institute or order
-  or agree to the institution of patent litigation against any entity
-  (including a cross-claim or counterclaim in a lawsuit) alleging that
-  THIS IMPLEMENTATION constitutes direct or contributory patent
-  infringement, or inducement of patent infringement, then any rights
-  granted to you under this License shall terminate as of the date
-  such litigation is filed.  If you or your agent or exclusive
-  licensee institute or order or agree to the institution of a PATENT
-  CHALLENGE, then Tokutek may terminate any rights granted to you
-  under this License.
-*/
-
-#ident "Copyright (c) 2007-2013 Tokutek Inc.  All rights reserved."
-#ident "The technology is licensed by the Massachusetts Institute of Technology, Rutgers State University of New Jersey, and the Research Foundation of State University of New York at Stony Brook under United States of America Serial No. 11/760379 and to the patents and/or patent applications resulting from it."
-
-#ifndef _TOKUDB_CONFIG_H
-#define _TOKUDB_CONFIG_H
+#include "db.h"
+#include "toku_os.h"
+#include "toku_time.h"
+#include "partitioned_counter.h"
 
 #ifdef USE_PRAGMA_INTERFACE
 #pragma interface               /* gcc class implementation */
-#endif
-
-#if !defined(TOKUDB_CHECK_JEMALLOC)
-#define TOKUDB_CHECK_JEMALLOC 1
 #endif
 
 #if 100000 <= MYSQL_VERSION_ID && MYSQL_VERSION_ID <= 100099
@@ -166,7 +135,7 @@ PATENT RIGHTS GRANT:
 #else
 #define TOKU_INCLUDE_LOCK_TIMEOUT_QUERY_STRING 1
 #endif
-#define TOKU_INCLUDE_HANDLERTON_HANDLE_FATAL_SIGNAL 0 /* MariaDB 5.5 */
+#define TOKU_INCLUDE_HANDLERTON_HANDLE_FATAL_SIGNAL 0
 
 #else
 #error
@@ -228,326 +197,54 @@ PATENT RIGHTS GRANT:
 /* Bits for share->status */
 #define STATUS_PRIMARY_KEY_INIT 0x1
 
-#endif // _TOKUDB_CONFIG_H
-
-#ifndef _TOKUDB_DEBUG_H
-#define _TOKUDB_DEBUG_H
-
-#define TOKU_INCLUDE_BACKTRACE 0
-#if TOKU_INCLUDE_BACKTRACE
-static void tokudb_backtrace(void);
-#endif
-
-extern ulong tokudb_debug;
-
-// tokudb debug tracing
-#define TOKUDB_DEBUG_INIT 1
-#define TOKUDB_DEBUG_OPEN 2
-#define TOKUDB_DEBUG_ENTER 4
-#define TOKUDB_DEBUG_RETURN 8
-#define TOKUDB_DEBUG_ERROR 16
-#define TOKUDB_DEBUG_TXN 32
-#define TOKUDB_DEBUG_AUTO_INCREMENT 64
-#define TOKUDB_DEBUG_INDEX_KEY 128
-#define TOKUDB_DEBUG_LOCK 256
-#define TOKUDB_DEBUG_CHECK_KEY 1024
-#define TOKUDB_DEBUG_HIDE_DDL_LOCK_ERRORS 2048
-#define TOKUDB_DEBUG_ALTER_TABLE 4096
-#define TOKUDB_DEBUG_UPSERT 8192
-#define TOKUDB_DEBUG_CHECK (1<<14)
-#define TOKUDB_DEBUG_ANALYZE (1<<15)
-
-#define TOKUDB_TRACE(f, ...) { \
-    fprintf(stderr, "%u %s:%u %s " f "\n", my_tid(), __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__); \
-}
-
-static inline unsigned int my_tid() {
-    return (unsigned int)toku_os_gettid();
-}
-
-#define TOKUDB_DBUG_ENTER(f, ...) { \
-    if (tokudb_debug & TOKUDB_DEBUG_ENTER) { \
-        TOKUDB_TRACE(f, ##__VA_ARGS__);       \
-    } \
-} \
-    DBUG_ENTER(__FUNCTION__);
-
-#define TOKUDB_DBUG_RETURN(r) { \
-    int rr = (r); \
-    if ((tokudb_debug & TOKUDB_DEBUG_RETURN) || (rr != 0 && (tokudb_debug & TOKUDB_DEBUG_ERROR))) { \
-        TOKUDB_TRACE("return %d", rr); \
-    } \
-    DBUG_RETURN(rr); \
-}
-
-#define TOKUDB_HANDLER_TRACE(f, ...) \
-    fprintf(stderr, "%u %p %s:%u ha_tokudb::%s " f "\n", my_tid(), this, __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__);
-
-#define TOKUDB_HANDLER_DBUG_ENTER(f, ...) { \
-    if (tokudb_debug & TOKUDB_DEBUG_ENTER) { \
-        TOKUDB_HANDLER_TRACE(f, ##__VA_ARGS__); \
-    } \
-} \
-    DBUG_ENTER(__FUNCTION__);
-
-#define TOKUDB_HANDLER_DBUG_RETURN(r) { \
-    int rr = (r); \
-    if ((tokudb_debug & TOKUDB_DEBUG_RETURN) || (rr != 0 && (tokudb_debug & TOKUDB_DEBUG_ERROR))) { \
-        TOKUDB_HANDLER_TRACE("return %d", rr); \
-    } \
-    DBUG_RETURN(rr); \
-}
-
-#define TOKUDB_HANDLER_DBUG_VOID_RETURN { \
-    if (tokudb_debug & TOKUDB_DEBUG_RETURN) { \
-        TOKUDB_HANDLER_TRACE("return");       \
-    } \
-    DBUG_VOID_RETURN; \
-}
-
-#define TOKUDB_DBUG_DUMP(s, p, len) \
-{ \
-    TOKUDB_TRACE("%s", s); \
-    uint i;                                                             \
-    for (i=0; i<len; i++) {                                             \
-        fprintf(stderr, "%2.2x", ((uchar*)p)[i]);                       \
-    }                                                                   \
-    fprintf(stderr, "\n");                                              \
-}
-
-/* The purpose of this file is to define assert() for use by the handlerton.
- * The intention is for a failed handlerton assert to invoke a failed assert
- * in the fractal tree layer, which dumps engine status to the error log.
- */
-
-void toku_hton_assert_fail(const char*/*expr_as_string*/,const char */*fun*/,const char*/*file*/,int/*line*/, int/*errno*/) __attribute__((__visibility__("default"))) __attribute__((__noreturn__));
-
-#undef assert  
-#define assert(expr)      ((expr)      ? (void)0 : toku_hton_assert_fail(#expr, __FUNCTION__, __FILE__, __LINE__, errno))
-
-#endif // _TOKUDB_DEBUG_H
-
-#ifndef _TOKUDB_TXN_H
-#define _TOKUDB_TXN_H
-
-typedef enum {
-    hatoku_iso_not_set = 0,
-    hatoku_iso_read_uncommitted,
-    hatoku_iso_read_committed,
-    hatoku_iso_repeatable_read,
-    hatoku_iso_serializable
-} HA_TOKU_ISO_LEVEL;
-
-
-
-typedef struct st_tokudb_stmt_progress {
-    ulonglong inserted;
-    ulonglong updated;
-    ulonglong deleted;
-    ulonglong queried;
-    bool using_loader;
-} tokudb_stmt_progress;
-
-
-typedef struct st_tokudb_trx_data {
-    DB_TXN *all;
-    DB_TXN *stmt;
-    DB_TXN *sp_level;
-    DB_TXN *sub_sp_level;
-    uint tokudb_lock_count;
-    uint create_lock_count;
-    tokudb_stmt_progress stmt_progress;
-    bool checkpoint_lock_taken;
-    LIST *handlers;
-} tokudb_trx_data;
-
-extern char *tokudb_data_dir;
-extern const char *ha_tokudb_ext;
-
-static inline void reset_stmt_progress (tokudb_stmt_progress* val) {
-    val->deleted = 0;
-    val->inserted = 0;
-    val->updated = 0;
-    val->queried = 0;
-}
-
-static inline int get_name_length(const char *name) {
-    int n = 0;
-    const char *newname = name;
-    n += strlen(newname);
-    n += strlen(ha_tokudb_ext);
-    return n;
-}
-
-//
-// returns maximum length of path to a dictionary
-//
-static inline int get_max_dict_name_path_length(const char *tablename) {
-    int n = 0;
-    n += get_name_length(tablename);
-    n += 1; //for the '-'
-    n += MAX_DICT_NAME_LEN;
-    return n;
-}
-
-static inline void make_name(char *newname, const char *tablename, const char *dictname) {
-    const char *newtablename = tablename;
-    char *nn = newname;
-    assert(tablename);
-    assert(dictname);
-    nn += sprintf(nn, "%s", newtablename);
-    nn += sprintf(nn, "-%s", dictname);
-}
-
-static inline int txn_begin(DB_ENV *env, DB_TXN *parent, DB_TXN **txn, uint32_t flags, THD *thd) {
-    *txn = NULL;
-    int r = env->txn_begin(env, parent, txn, flags);
-    if (r == 0 && thd) {
-        DB_TXN *this_txn = *txn;
-        this_txn->set_client_id(this_txn, thd_get_thread_id(thd));
-    }
-    if ((tokudb_debug & TOKUDB_DEBUG_TXN)) {
-        TOKUDB_TRACE("begin txn %p %p %u r=%d", parent, *txn, flags, r);
-    }
-    return r;
-}
-
-static inline void commit_txn(DB_TXN* txn, uint32_t flags) {
-    if (tokudb_debug & TOKUDB_DEBUG_TXN)
-        TOKUDB_TRACE("commit txn %p", txn);
-    int r = txn->commit(txn, flags);
-    if (r != 0) {
-        sql_print_error("tried committing transaction %p and got error code %d", txn, r);
-    }
-    assert(r == 0);
-}
-
-static inline void abort_txn(DB_TXN* txn) {
-    if (tokudb_debug & TOKUDB_DEBUG_TXN)
-        TOKUDB_TRACE("abort txn %p", txn);
-    int r = txn->abort(txn);
-    if (r != 0) {
-        sql_print_error("tried aborting transaction %p and got error code %d", txn, r);
-    }
-    assert(r == 0);
-}
-
-#endif // _TOKUDB_TXN_H
-
-#ifndef _TOKUDB_PORTABILITY_H
-#define _TOKUDB_PORTABILITY_H
-
-static inline void *tokudb_my_malloc(size_t s, myf flags) {
-#if 50700 <= MYSQL_VERSION_ID && MYSQL_VERSION_ID <= 50799
-    return my_malloc(0, s, flags);
+#if defined(TOKUDB_VERSION_MAJOR) && defined(TOKUDB_VERSION_MINOR)
+#define TOKUDB_PLUGIN_VERSION ((TOKUDB_VERSION_MAJOR << 8) + TOKUDB_VERSION_MINOR)
 #else
-    return my_malloc(s, flags);
+#define TOKUDB_PLUGIN_VERSION 0
 #endif
-}
 
-static inline void *tokudb_my_realloc(void *p, size_t s, myf flags) {
-    if (s == 0)
-        return p;
-#if 50700 <= MYSQL_VERSION_ID && MYSQL_VERSION_ID <= 50799
-    return my_realloc(0, p, s, flags);
+// Branch prediction macros.
+// If supported by the compiler, will hint in instruction caching for likely
+// branching. Should only be used where there is a very good idea of the correct
+// branch heuristics as determined by profiling. Mostly copied from InnoDB.
+// Use:
+//   "if (TOKUDB_LIKELY(x))" where the chances of "x" evaluating true are higher
+//   "if (TOKUDB_UNLIKELY(x))" where the chances of "x" evaluating false are higher
+#if defined(__GNUC__) && (__GNUC__ > 2) && ! defined(__INTEL_COMPILER)
+
+// Tell the compiler that 'expr' probably evaluates to 'constant'.
+#define TOKUDB_EXPECT(expr,constant) __builtin_expect(expr, constant)
+
 #else
-    return my_realloc(p, s, flags | MY_ALLOW_ZERO_PTR);
-#endif
-}
 
-static inline void tokudb_my_free(void *ptr) {
-    if (ptr)
-        my_free(ptr);
-}
+#error "No TokuDB branch prediction operations in use!"
+#define TOKUDB_EXPECT(expr,constant) (expr)
 
-static inline char *tokudb_my_strdup(const char *p, myf flags) {
-#if 50700 <= MYSQL_VERSION_ID && MYSQL_VERSION_ID <= 50799
-    return my_strdup(0, p, flags);
-#else
-    return my_strdup(p, flags);
-#endif
-}
+#endif // defined(__GNUC__) && (__GNUC__ > 2) && ! defined(__INTEL_COMPILER)
 
-static inline void* tokudb_my_multi_malloc(myf myFlags, ...) {
-  va_list args;
-  char **ptr,*start,*res;
-  size_t tot_length,length;
+// Tell the compiler that cond is likely to hold
+#define TOKUDB_LIKELY(cond) TOKUDB_EXPECT(cond, 1)
 
-  va_start(args,myFlags);
-  tot_length=0;
-  while ((ptr=va_arg(args, char **))) {
-      length=va_arg(args,uint);
-      tot_length+=ALIGN_SIZE(length);
-  }
-  va_end(args);
+// Tell the compiler that cond is unlikely to hold
+#define TOKUDB_UNLIKELY(cond) TOKUDB_EXPECT(cond, 0)
 
-  if (!(start=(char *) tokudb_my_malloc(tot_length,myFlags))) {
-      return 0;
-  }
-
-  va_start(args,myFlags);
-  res=start;
-  while ((ptr=va_arg(args, char **))) {
-      *ptr=res;
-      length=va_arg(args,uint);
-      res+=ALIGN_SIZE(length);
-  }
-  va_end(args);
-  return start;
-}
-
-static inline void tokudb_pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr) {
-    int r = pthread_mutex_init(mutex, attr);
-    assert(r == 0);
-}
-
-static inline void tokudb_pthread_mutex_destroy(pthread_mutex_t *mutex) {
-    int r = pthread_mutex_destroy(mutex);
-    assert(r == 0);
-}
-
-static inline void tokudb_pthread_mutex_lock(pthread_mutex_t *mutex) {
-    int r = pthread_mutex_lock(mutex);
-    assert(r == 0);
-}
-
-static inline void tokudb_pthread_mutex_unlock(pthread_mutex_t *mutex) {
-    int r = pthread_mutex_unlock(mutex);
-    assert(r == 0);
-}
-
-static inline void tokudb_pthread_cond_init(pthread_cond_t *cond, const pthread_condattr_t *attr) {
-    int r = pthread_cond_init(cond, attr);
-    assert(r == 0);
-}
-
-static inline void tokudb_pthread_cond_destroy(pthread_cond_t *cond) {
-    int r = pthread_cond_destroy(cond);
-    assert(r == 0);
-}
-
-static inline void tokudb_pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
-    int r = pthread_cond_wait(cond, mutex);
-    assert(r == 0);
-}
-
-static inline void tokudb_pthread_cond_broadcast(pthread_cond_t *cond) {
-    int r = pthread_cond_broadcast(cond);
-    assert(r == 0);
-}
-
+// Tell the compiler that the function/argument is unused
+#define TOKUDB_UNUSED(_uu) _uu __attribute__((unused))
 // mysql 5.6.15 removed the test macro, so we define our own
 #define tokudb_test(e) ((e) ? 1 : 0)
 
-static const char *tokudb_thd_get_proc_info(THD *thd) {
+inline const char* tokudb_thd_get_proc_info(const THD* thd) {
     return thd->proc_info;
+}
+inline void tokudb_thd_set_proc_info(THD* thd, const char* proc_info) {
+    thd_proc_info(thd, proc_info);
 }
 
 // uint3korr reads 4 bytes and valgrind reports an error, so we use this function instead
-static uint tokudb_uint3korr(const uchar *a) {
+inline uint tokudb_uint3korr(const uchar *a) {
     uchar b[4] = {};
     memcpy(b, a, 3);
     return uint3korr(b);
 }
 
-#endif // _TOKUDB_PORTABILITY_H
+#endif // _HATOKU_DEFINES_H

@@ -1,5 +1,5 @@
-/* Copyright (c) 2000, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2013, Monty Program Ab.
+/* Copyright (c) 2000, 2016, Oracle and/or its affiliates.
+   Copyright (c) 2009, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -284,7 +284,7 @@ handler *get_ha_partition(partition_info *part_info)
 static const char **handler_errmsgs;
 
 C_MODE_START
-static const char **get_handler_errmsgs()
+static const char **get_handler_errmsgs(void)
 {
   return handler_errmsgs;
 }
@@ -313,7 +313,7 @@ int ha_init_errors(void)
   /* Set the dedicated error messages. */
   SETMSG(HA_ERR_KEY_NOT_FOUND,          ER_DEFAULT(ER_KEY_NOT_FOUND));
   SETMSG(HA_ERR_FOUND_DUPP_KEY,         ER_DEFAULT(ER_DUP_KEY));
-  SETMSG(HA_ERR_RECORD_CHANGED,         "Update wich is recoverable");
+  SETMSG(HA_ERR_RECORD_CHANGED,         "Update which is recoverable");
   SETMSG(HA_ERR_WRONG_INDEX,            "Wrong index given to function");
   SETMSG(HA_ERR_CRASHED,                ER_DEFAULT(ER_NOT_KEYFILE));
   SETMSG(HA_ERR_WRONG_IN_RECORD,        ER_DEFAULT(ER_CRASHED_ON_USAGE));
@@ -1337,7 +1337,8 @@ int ha_commit_trans(THD *thd, bool all)
 
   uint rw_ha_count= ha_check_and_coalesce_trx_read_only(thd, ha_info, all);
   /* rw_trans is TRUE when we in a transaction changing data */
-  bool rw_trans= is_real_trans && (rw_ha_count > 0);
+  bool rw_trans= is_real_trans &&
+                 (rw_ha_count > !thd->is_current_stmt_binlog_disabled());
   MDL_request mdl_request;
   DBUG_PRINT("info", ("is_real_trans: %d  rw_trans:  %d  rw_ha_count: %d",
                       is_real_trans, rw_trans, rw_ha_count));
@@ -1581,6 +1582,26 @@ int ha_rollback_trans(THD *thd, bool all)
   */
   DBUG_ASSERT(thd->transaction.stmt.ha_list == NULL ||
               trans == &thd->transaction.stmt);
+
+#ifdef HAVE_REPLICATION
+  if (is_real_trans)
+  {
+    /*
+      In parallel replication, if we need to rollback during commit, we must
+      first inform following transactions that we are going to abort our commit
+      attempt. Otherwise those following transactions can run too early, and
+      possibly cause replication to fail. See comments in retry_event_group().
+
+      There were several bugs with this in the past that were very hard to
+      track down (MDEV-7458, MDEV-8302). So we add here an assertion for
+      rollback without signalling following transactions. And in release
+      builds, we explicitly do the signalling before rolling back.
+    */
+    DBUG_ASSERT(!(thd->rgi_slave && thd->rgi_slave->did_mark_start_commit));
+    if (thd->rgi_slave && thd->rgi_slave->did_mark_start_commit)
+      thd->rgi_slave->unmark_start_commit();
+  }
+#endif
 
   if (thd->in_sub_stmt)
   {
@@ -2736,6 +2757,15 @@ int handler::ha_index_next_same(uchar *buf, const uchar *key, uint keylen)
   return result;
 }
 
+
+bool handler::ha_was_semi_consistent_read()
+{
+  bool result= was_semi_consistent_read();
+  if (result)
+    increment_statistics(&SSV::ha_read_retry_count);
+  return result;
+}
+
 /* Initialize handler for random reading, with error handling */
 
 int handler::ha_rnd_init_with_error(bool scan)
@@ -3341,6 +3371,7 @@ void handler::print_error(int error, myf errflag)
     textno=ER_FILE_USED;
     break;
   case ENOENT:
+  case ENOTDIR:
     textno=ER_FILE_NOT_FOUND;
     break;
   case ENOSPC:
@@ -3819,8 +3850,7 @@ int handler::delete_table(const char *name)
 
   for (const char **ext=bas_ext(); *ext ; ext++)
   {
-    fn_format(buff, name, "", *ext, MY_UNPACK_FILENAME|MY_APPEND_EXT);
-    if (mysql_file_delete_with_symlink(key_file_misc, buff, MYF(0)))
+    if (my_handler_delete_with_symlink(key_file_misc, name, *ext, 0))
     {
       if (my_errno != ENOENT)
       {
@@ -4179,7 +4209,7 @@ enum_alter_inplace_result
 handler::check_if_supported_inplace_alter(TABLE *altered_table,
                                           Alter_inplace_info *ha_alter_info)
 {
-  DBUG_ENTER("check_if_supported_alter");
+  DBUG_ENTER("handler::check_if_supported_inplace_alter");
 
   HA_CREATE_INFO *create_info= ha_alter_info->create_info;
 
@@ -4189,6 +4219,7 @@ handler::check_if_supported_inplace_alter(TABLE *altered_table,
     Alter_inplace_info::ALTER_COLUMN_DEFAULT |
     Alter_inplace_info::ALTER_COLUMN_OPTION |
     Alter_inplace_info::CHANGE_CREATE_OPTION |
+    Alter_inplace_info::ALTER_PARTITIONED |
     Alter_inplace_info::ALTER_RENAME;
 
   /* Is there at least one operation that requires copy algorithm? */
@@ -4216,7 +4247,7 @@ handler::check_if_supported_inplace_alter(TABLE *altered_table,
     IS_EQUAL_PACK_LENGTH : IS_EQUAL_YES;
   if (table->file->check_if_incompatible_data(create_info, table_changes)
       == COMPATIBLE_DATA_YES)
-    DBUG_RETURN(HA_ALTER_INPLACE_EXCLUSIVE_LOCK);
+    DBUG_RETURN(HA_ALTER_INPLACE_NO_LOCK);
 
   DBUG_RETURN(HA_ALTER_INPLACE_NOT_SUPPORTED);
 }
@@ -4493,7 +4524,7 @@ void handler::get_dynamic_partition_info(PARTITION_STATS *stat_info,
   stat_info->update_time=          stats.update_time;
   stat_info->check_time=           stats.check_time;
   stat_info->check_sum=            0;
-  if (table_flags() & (HA_HAS_OLD_CHECKSUM | HA_HAS_OLD_CHECKSUM))
+  if (table_flags() & (HA_HAS_OLD_CHECKSUM | HA_HAS_NEW_CHECKSUM))
     stat_info->check_sum= checksum();
   return;
 }
@@ -5096,7 +5127,7 @@ bool Discovered_table_list::add_table(const char *tname, size_t tlen)
     custom discover_table_names() method, that calls add_table() directly).
     Note: avoid comparing the same name twice (here and in add_file).
   */
-  if (wild && my_wildcmp(files_charset_info, tname, tname + tlen, wild, wend,
+  if (wild && my_wildcmp(table_alias_charset, tname, tname + tlen, wild, wend,
                          wild_prefix, wild_one, wild_many))
       return 0;
 

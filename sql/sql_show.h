@@ -1,4 +1,5 @@
-/* Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2005, 2010, Oracle and/or its affiliates.
+   Copyright (c) 2012, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -97,8 +98,6 @@ bool mysqld_show_storage_engines(THD *thd);
 bool mysqld_show_authors(THD *thd);
 bool mysqld_show_contributors(THD *thd);
 bool mysqld_show_privileges(THD *thd);
-bool mysqld_show_lvemem(THD *thd);
-bool mysqld_show_lvelist(THD *thd);
 char *make_backup_log_name(char *buff, const char *name, const char* log_ext);
 void calc_sum_of_all_status(STATUS_VAR *to);
 void append_definer(THD *thd, String *buffer, const LEX_STRING *definer_user,
@@ -114,7 +113,8 @@ void view_store_options(THD *thd, TABLE_LIST *table, String *buff);
 void init_fill_schema_files_row(TABLE* table);
 bool schema_table_store_record(THD *thd, TABLE *table);
 void initialize_information_schema_acl();
-
+int del_global_index_stat(THD *thd, TABLE* tab, KEY* key_info);
+int del_global_table_stat(THD *thd, LEX_STRING *db, LEX_STRING *table);
 ST_SCHEMA_TABLE *find_schema_table(THD *thd, const char* table_name);
 ST_SCHEMA_TABLE *get_schema_table(enum enum_schema_tables schema_table_idx);
 int make_schema_select(THD *thd,  SELECT_LEX *sel,

@@ -1,6 +1,6 @@
 /*
-   Copyright (c) 2000, 2012, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2012, Monty Program Ab
+   Copyright (c) 2000, 2015, Oracle and/or its affiliates.
+   Copyright (c) 2010, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -51,9 +51,9 @@ static int list_tables(MYSQL *mysql,const char *db,const char *table);
 static int list_table_status(MYSQL *mysql,const char *db,const char *table);
 static int list_fields(MYSQL *mysql,const char *db,const char *table,
 		       const char *field);
-static void print_header(const char *header,uint head_length,...);
-static void print_row(const char *header,uint head_length,...);
-static void print_trailer(uint length,...);
+static void print_header(const char *header,size_t head_length,...);
+static void print_row(const char *header,size_t head_length,...);
+static void print_trailer(size_t length,...);
 static void print_res_header(MYSQL_RES *result);
 static void print_res_top(MYSQL_RES *result);
 static void print_res_row(MYSQL_RES *result,MYSQL_ROW cur);
@@ -68,10 +68,12 @@ int main(int argc, char **argv)
   my_bool first_argument_uses_wildcards=0;
   char *wild;
   MYSQL mysql;
+  static char **defaults_argv;
   MY_INIT(argv[0]);
   sf_leaking_memory=1; /* don't report memory leaks on early exits */
   if (load_defaults("my",load_default_groups,&argc,&argv))
     exit(1);
+  defaults_argv=argv;
 
   get_options(&argc,&argv);
 
@@ -150,7 +152,8 @@ int main(int argc, char **argv)
 			   0)))
   {
     fprintf(stderr,"%s: %s\n",my_progname,mysql_error(&mysql));
-    exit(1);
+    error= 1;
+    goto error;
   }
   mysql.reconnect= 1;
 
@@ -169,11 +172,14 @@ int main(int argc, char **argv)
       error=list_fields(&mysql,argv[0],argv[1],wild);
     break;
   }
+error:
   mysql_close(&mysql);			/* Close & free connection */
   my_free(opt_password);
+  mysql_server_end();
 #ifdef HAVE_SMEM
   my_free(shared_memory_base_name);
 #endif
+  free_defaults(defaults_argv);
   my_end(my_end_arg);
   exit(error ? 1 : 0);
   return 0;				/* No compiler warnings */
@@ -373,10 +379,11 @@ static int
 list_dbs(MYSQL *mysql,const char *wild)
 {
   const char *header;
-  uint length, counter = 0;
+  size_t length = 0;
+  uint counter = 0;
   ulong rowcount = 0L;
   char tables[NAME_LEN+1], rows[NAME_LEN+1];
-  char query[255];
+  char query[NAME_LEN + 100];
   MYSQL_FIELD *field;
   MYSQL_RES *result;
   MYSQL_ROW row= NULL, rrow;
@@ -411,7 +418,7 @@ list_dbs(MYSQL *mysql,const char *wild)
     printf("Wildcard: %s\n",wild);
 
   header="Databases";
-  length=(uint) strlen(header);
+  length= strlen(header);
   field=mysql_fetch_field(result);
   if (length < field->max_length)
     length=field->max_length;
@@ -443,7 +450,8 @@ list_dbs(MYSQL *mysql,const char *wild)
             MYSQL_ROW trow;
 	    while ((trow = mysql_fetch_row(tresult)))
 	    {
-	      sprintf(query,"SELECT COUNT(*) FROM `%s`",trow[0]);
+              my_snprintf(query, sizeof(query),
+                          "SELECT COUNT(*) FROM `%s`", trow[0]);
 	      if (!(mysql_query(mysql,query)))
 	      {
 		MYSQL_RES *rresult;
@@ -498,8 +506,9 @@ static int
 list_tables(MYSQL *mysql,const char *db,const char *table)
 {
   const char *header;
-  uint head_length, counter = 0;
-  char query[255], rows[NAME_LEN], fields[16];
+  size_t head_length;
+  uint counter = 0;
+  char query[NAME_LEN + 100], rows[NAME_LEN], fields[16];
   MYSQL_FIELD *field;
   MYSQL_RES *result;
   MYSQL_ROW row, rrow;
@@ -535,7 +544,7 @@ list_tables(MYSQL *mysql,const char *db,const char *table)
   putchar('\n');
 
   header="Tables";
-  head_length=(uint) strlen(header);
+  head_length= strlen(header);
   field=mysql_fetch_field(result);
   if (head_length < field->max_length)
     head_length=field->max_length;
@@ -584,7 +593,8 @@ list_tables(MYSQL *mysql,const char *db,const char *table)
 	  if (opt_verbose > 1)
 	  {
             /* Print the count of rows for each table */
-	    sprintf(query,"SELECT COUNT(*) FROM `%s`",row[0]);
+            my_snprintf(query, sizeof(query), "SELECT COUNT(*) FROM `%s`",
+                        row[0]);
 	    if (!(mysql_query(mysql,query)))
 	    {
 	      if ((rresult = mysql_store_result(mysql)))
@@ -644,13 +654,15 @@ list_tables(MYSQL *mysql,const char *db,const char *table)
 static int
 list_table_status(MYSQL *mysql,const char *db,const char *wild)
 {
-  char query[1024],*end;
+  char query[NAME_LEN + 100];
+  int len;
   MYSQL_RES *result;
   MYSQL_ROW row;
 
-  end=strxmov(query,"show table status from `",db,"`",NullS);
-  if (wild && wild[0])
-    strxmov(end," like '",wild,"'",NullS);
+  len= sizeof(query);
+  len-= my_snprintf(query, len, "show table status from `%s`", db);
+  if (wild && wild[0] && len)
+    strxnmov(query + strlen(query), len - 1, " like '", wild, "'", NullS);
   if (mysql_query(mysql,query) || !(result=mysql_store_result(mysql)))
   {
     fprintf(stderr,"%s: Cannot get status for db: %s, table: %s: %s\n",
@@ -682,7 +694,8 @@ static int
 list_fields(MYSQL *mysql,const char *db,const char *table,
 	    const char *wild)
 {
-  char query[1024],*end;
+  char query[NAME_LEN + 100];
+  size_t len;
   MYSQL_RES *result;
   MYSQL_ROW row;
   ulong UNINIT_VAR(rows);
@@ -696,7 +709,7 @@ list_fields(MYSQL *mysql,const char *db,const char *table,
 
   if (opt_count)
   {
-    sprintf(query,"select count(*) from `%s`", table);
+    my_snprintf(query, sizeof(query), "select count(*) from `%s`", table);
     if (mysql_query(mysql,query) || !(result=mysql_store_result(mysql)))
     {
       fprintf(stderr,"%s: Cannot get record count for db: %s, table: %s: %s\n",
@@ -708,9 +721,11 @@ list_fields(MYSQL *mysql,const char *db,const char *table,
     mysql_free_result(result);
   }
 
-  end=strmov(strmov(strmov(query,"show /*!32332 FULL */ columns from `"),table),"`");
-  if (wild && wild[0])
-    strxmov(end," like '",wild,"'",NullS);
+  len= sizeof(query);
+  len-= my_snprintf(query, len, "show /*!32332 FULL */ columns from `%s`",
+                    table);
+  if (wild && wild[0] && len)
+    strxnmov(query + strlen(query), len - 1, " like '", wild, "'", NullS);
   if (mysql_query(mysql,query) || !(result=mysql_store_result(mysql)))
   {
     fprintf(stderr,"%s: Cannot list columns in db: %s, table: %s: %s\n",
@@ -731,7 +746,7 @@ list_fields(MYSQL *mysql,const char *db,const char *table,
   print_res_top(result);
   if (opt_show_keys)
   {
-    end=strmov(strmov(strmov(query,"show keys from `"),table),"`");
+    my_snprintf(query, sizeof(query), "show keys from `%s`", table);
     if (mysql_query(mysql,query) || !(result=mysql_store_result(mysql)))
     {
       fprintf(stderr,"%s: Cannot list keys in db: %s, table: %s: %s\n",
@@ -758,10 +773,10 @@ list_fields(MYSQL *mysql,const char *db,const char *table,
 *****************************************************************************/
 
 static void
-print_header(const char *header,uint head_length,...)
+print_header(const char *header,size_t head_length,...)
 {
   va_list args;
-  uint length,i,str_length,pre_space;
+  size_t length,i,str_length,pre_space;
   const char *field;
 
   va_start(args,head_length);
@@ -784,10 +799,10 @@ print_header(const char *header,uint head_length,...)
   putchar('|');
   for (;;)
   {
-    str_length=(uint) strlen(field);
+    str_length= strlen(field);
     if (str_length > length)
       str_length=length+1;
-    pre_space=(uint) (((int) length-(int) str_length)/2)+1;
+    pre_space= ((length- str_length)/2)+1;
     for (i=0 ; i < pre_space ; i++)
       putchar(' ');
     for (i = 0 ; i < str_length ; i++)
@@ -821,11 +836,11 @@ print_header(const char *header,uint head_length,...)
 
 
 static void
-print_row(const char *header,uint head_length,...)
+print_row(const char *header,size_t head_length,...)
 {
   va_list args;
   const char *field;
-  uint i,length,field_length;
+  size_t i,length,field_length;
 
   va_start(args,head_length);
   field=header; length=head_length;
@@ -834,7 +849,7 @@ print_row(const char *header,uint head_length,...)
     putchar('|');
     putchar(' ');
     fputs(field,stdout);
-    field_length=(uint) strlen(field);
+    field_length= strlen(field);
     for (i=field_length ; i <= length ; i++)
       putchar(' ');
     if (!(field=va_arg(args,char *)))
@@ -848,10 +863,10 @@ print_row(const char *header,uint head_length,...)
 
 
 static void
-print_trailer(uint head_length,...)
+print_trailer(size_t head_length,...)
 {
   va_list args;
-  uint length,i;
+  size_t length,i;
 
   va_start(args,head_length);
   length=head_length;
@@ -894,7 +909,7 @@ static void print_res_top(MYSQL_RES *result)
   mysql_field_seek(result,0);
   while((field = mysql_fetch_field(result)))
   {
-    if ((length=(uint) strlen(field->name)) > field->max_length)
+    if ((length= strlen(field->name)) > field->max_length)
       field->max_length=length;
     else
       length=field->max_length;

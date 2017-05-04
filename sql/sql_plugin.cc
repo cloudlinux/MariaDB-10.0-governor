@@ -1049,7 +1049,7 @@ static bool plugin_add(MEM_ROOT *tmp_root,
 
   if (name->str && plugin_find_internal(name, MYSQL_ANY_PLUGIN))
   {
-    report_error(report, ER_UDF_EXISTS, name->str);
+    report_error(report, ER_PLUGIN_INSTALLED, name->str);
     DBUG_RETURN(TRUE);
   }
   /* Clear the whole struct to catch future extensions. */
@@ -1546,6 +1546,9 @@ int plugin_init(int *argc, char **argv, int flags)
   /*
     First we register builtin plugins
   */
+  if (global_system_variables.log_warnings >= 9)
+    sql_print_information("Initializing built-in plugins");
+
   for (builtins= mysql_mandatory_plugins; *builtins || mandatory; builtins++)
   {
     if (!*builtins)
@@ -1627,11 +1630,17 @@ int plugin_init(int *argc, char **argv, int flags)
   {
     I_List_iterator<i_string> iter(opt_plugin_load_list);
     i_string *item;
+    if (global_system_variables.log_warnings >= 9)
+      sql_print_information("Initializing plugins specified on the command line");
     while (NULL != (item= iter++))
       plugin_load_list(&tmp_root, item->ptr);
 
     if (!(flags & PLUGIN_INIT_SKIP_PLUGIN_TABLE))
+    {
+      if (global_system_variables.log_warnings >= 9)
+        sql_print_information("Initializing installed plugins");
       plugin_load(&tmp_root);
+    }
   }
 
   /*
@@ -1772,9 +1781,7 @@ static void plugin_load(MEM_ROOT *tmp_root)
       the mutex here to satisfy the assert
     */
     mysql_mutex_lock(&LOCK_plugin);
-    if (plugin_add(tmp_root, &name, &dl, REPORT_TO_LOG))
-      sql_print_warning("Couldn't load plugin named '%s' with soname '%s'.",
-                        str_name.c_ptr(), str_dl.c_ptr());
+    plugin_add(tmp_root, &name, &dl, REPORT_TO_LOG);
     free_root(tmp_root, MYF(MY_MARK_BLOCKS_FREE));
     mysql_mutex_unlock(&LOCK_plugin);
   }
@@ -1784,9 +1791,7 @@ static void plugin_load(MEM_ROOT *tmp_root)
   table->m_needs_reopen= TRUE;                  // Force close to free memory
   close_mysql_tables(new_thd);
 end:
-  /* Remember that we don't have a THD */
   delete new_thd;
-  set_current_thd(0);
   DBUG_VOID_RETURN;
 }
 
@@ -2805,6 +2810,22 @@ static st_bookmark *find_bookmark(const char *plugin, const char *name,
 }
 
 
+static size_t var_storage_size(int flags)
+{
+  switch (flags & PLUGIN_VAR_TYPEMASK) {
+  case PLUGIN_VAR_BOOL:         return sizeof(my_bool);
+  case PLUGIN_VAR_INT:          return sizeof(int);
+  case PLUGIN_VAR_LONG:         return sizeof(long);
+  case PLUGIN_VAR_ENUM:         return sizeof(long);
+  case PLUGIN_VAR_LONGLONG:     return sizeof(ulonglong);
+  case PLUGIN_VAR_SET:          return sizeof(ulonglong);
+  case PLUGIN_VAR_STR:          return sizeof(char*);
+  case PLUGIN_VAR_DOUBLE:       return sizeof(double);
+  default: DBUG_ASSERT(0);      return 0;
+  }
+}
+
+
 /*
   returns a bookmark for thd-local variables, creating if neccessary.
   returns null for non thd-local variables.
@@ -2813,39 +2834,13 @@ static st_bookmark *find_bookmark(const char *plugin, const char *name,
 static st_bookmark *register_var(const char *plugin, const char *name,
                                  int flags)
 {
-  uint length= strlen(plugin) + strlen(name) + 3, size= 0, offset, new_size;
+  uint length= strlen(plugin) + strlen(name) + 3, size, offset, new_size;
   st_bookmark *result;
   char *varname, *p;
 
-  if (!(flags & PLUGIN_VAR_THDLOCAL))
-    return NULL;
+  DBUG_ASSERT(flags & PLUGIN_VAR_THDLOCAL);
 
-  switch (flags & PLUGIN_VAR_TYPEMASK) {
-  case PLUGIN_VAR_BOOL:
-    size= sizeof(my_bool);
-    break;
-  case PLUGIN_VAR_INT:
-    size= sizeof(int);
-    break;
-  case PLUGIN_VAR_LONG:
-  case PLUGIN_VAR_ENUM:
-    size= sizeof(long);
-    break;
-  case PLUGIN_VAR_LONGLONG:
-  case PLUGIN_VAR_SET:
-    size= sizeof(ulonglong);
-    break;
-  case PLUGIN_VAR_STR:
-    size= sizeof(char*);
-    break;
-  case PLUGIN_VAR_DOUBLE:
-    size= sizeof(double);
-    break;
-  default:
-    DBUG_ASSERT(0);
-    return NULL;
-  };
-
+  size= var_storage_size(flags);
   varname= ((char*) my_alloca(length));
   strxmov(varname + 1, plugin, "_", name, NullS);
   for (p= varname + 1; *p; p++)
@@ -2932,68 +2927,8 @@ static uchar *intern_sys_var_ptr(THD* thd, int offset, bool global_lock)
   if (!thd->variables.dynamic_variables_ptr ||
       (uint)offset > thd->variables.dynamic_variables_head)
   {
-    uint idx;
-
     mysql_rwlock_rdlock(&LOCK_system_variables_hash);
-
-    thd->variables.dynamic_variables_ptr= (char*)
-      my_realloc(thd->variables.dynamic_variables_ptr,
-                 global_variables_dynamic_size,
-                 MYF(MY_WME | MY_FAE | MY_ALLOW_ZERO_PTR));
-
-    if (global_lock)
-      mysql_mutex_lock(&LOCK_global_system_variables);
-
-    mysql_mutex_assert_owner(&LOCK_global_system_variables);
-
-    memcpy(thd->variables.dynamic_variables_ptr +
-             thd->variables.dynamic_variables_size,
-           global_system_variables.dynamic_variables_ptr +
-             thd->variables.dynamic_variables_size,
-           global_system_variables.dynamic_variables_size -
-             thd->variables.dynamic_variables_size);
-
-    /*
-      now we need to iterate through any newly copied 'defaults'
-      and if it is a string type with MEMALLOC flag, we need to strdup
-    */
-    for (idx= 0; idx < bookmark_hash.records; idx++)
-    {
-      sys_var_pluginvar *pi;
-      sys_var *var;
-      st_bookmark *v= (st_bookmark*) my_hash_element(&bookmark_hash,idx);
-
-      if (v->version <= thd->variables.dynamic_variables_version)
-        continue; /* already in thd->variables */
-
-      if (!(var= intern_find_sys_var(v->key + 1, v->name_len)) ||
-          !(pi= var->cast_pluginvar()) ||
-          v->key[0] != plugin_var_bookmark_key(pi->plugin_var->flags))
-        continue;
-
-      /* Here we do anything special that may be required of the data types */
-
-      if ((pi->plugin_var->flags & PLUGIN_VAR_TYPEMASK) == PLUGIN_VAR_STR &&
-          pi->plugin_var->flags & PLUGIN_VAR_MEMALLOC)
-      {
-         char **pp= (char**) (thd->variables.dynamic_variables_ptr +
-                             *(int*)(pi->plugin_var + 1));
-         if ((*pp= *(char**) (global_system_variables.dynamic_variables_ptr +
-                             *(int*)(pi->plugin_var + 1))))
-           *pp= my_strdup(*pp, MYF(MY_WME|MY_FAE));
-      }
-    }
-
-    if (global_lock)
-      mysql_mutex_unlock(&LOCK_global_system_variables);
-
-    thd->variables.dynamic_variables_version=
-           global_system_variables.dynamic_variables_version;
-    thd->variables.dynamic_variables_head=
-           global_system_variables.dynamic_variables_head;
-    thd->variables.dynamic_variables_size=
-           global_system_variables.dynamic_variables_size;
-
+    sync_dynamic_session_variables(thd, global_lock);
     mysql_rwlock_unlock(&LOCK_system_variables_hash);
   }
   DBUG_RETURN((uchar*)thd->variables.dynamic_variables_ptr + offset);
@@ -3070,6 +3005,62 @@ void plugin_thdvar_init(THD *thd)
   intern_plugin_unlock(NULL, old_table_plugin);
   mysql_mutex_unlock(&LOCK_plugin);
   DBUG_VOID_RETURN;
+}
+
+
+
+void sync_dynamic_session_variables(THD* thd, bool global_lock)
+{
+  uint idx;
+
+  thd->variables.dynamic_variables_ptr= (char*)
+    my_realloc(thd->variables.dynamic_variables_ptr,
+               global_variables_dynamic_size,
+               MYF(MY_WME | MY_FAE | MY_ALLOW_ZERO_PTR));
+
+  if (global_lock)
+    mysql_mutex_lock(&LOCK_global_system_variables);
+
+  mysql_mutex_assert_owner(&LOCK_global_system_variables);
+
+  memcpy(thd->variables.dynamic_variables_ptr +
+           thd->variables.dynamic_variables_size,
+         global_system_variables.dynamic_variables_ptr +
+           thd->variables.dynamic_variables_size,
+         global_system_variables.dynamic_variables_size -
+           thd->variables.dynamic_variables_size);
+
+  /*
+    now we need to iterate through any newly copied 'defaults'
+    and if it is a string type with MEMALLOC flag, we need to strdup
+  */
+  for (idx= 0; idx < bookmark_hash.records; idx++)
+  {
+    st_bookmark *v= (st_bookmark*) my_hash_element(&bookmark_hash,idx);
+
+    if (v->version <= thd->variables.dynamic_variables_version)
+      continue; /* already in thd->variables */
+
+    /* Here we do anything special that may be required of the data types */
+
+    if ((v->key[0] & PLUGIN_VAR_TYPEMASK) == PLUGIN_VAR_STR &&
+         v->key[0] & BOOKMARK_MEMALLOC)
+    {
+      char **pp= (char**) (thd->variables.dynamic_variables_ptr + v->offset);
+      if (*pp)
+        *pp= my_strdup(*pp, MYF(MY_WME|MY_FAE));
+    }
+  }
+
+  if (global_lock)
+    mysql_mutex_unlock(&LOCK_global_system_variables);
+
+  thd->variables.dynamic_variables_version=
+         global_system_variables.dynamic_variables_version;
+  thd->variables.dynamic_variables_head=
+         global_system_variables.dynamic_variables_head;
+  thd->variables.dynamic_variables_size=
+         global_system_variables.dynamic_variables_size;
 }
 
 
@@ -3316,6 +3307,48 @@ bool sys_var_pluginvar::session_update(THD *thd, set_var *var)
   return false;
 }
 
+static const void *var_def_ptr(st_mysql_sys_var *pv)
+{
+    switch (pv->flags & (PLUGIN_VAR_TYPEMASK | PLUGIN_VAR_THDLOCAL)) {
+    case PLUGIN_VAR_INT:
+      return &((sysvar_uint_t*) pv)->def_val;
+    case PLUGIN_VAR_LONG:
+      return &((sysvar_ulong_t*) pv)->def_val;
+    case PLUGIN_VAR_LONGLONG:
+      return &((sysvar_ulonglong_t*) pv)->def_val;
+    case PLUGIN_VAR_ENUM:
+      return &((sysvar_enum_t*) pv)->def_val;
+    case PLUGIN_VAR_SET:
+      return &((sysvar_set_t*) pv)->def_val;
+    case PLUGIN_VAR_BOOL:
+      return &((sysvar_bool_t*) pv)->def_val;
+    case PLUGIN_VAR_STR:
+      return &((sysvar_str_t*) pv)->def_val;
+    case PLUGIN_VAR_DOUBLE:
+      return &((sysvar_double_t*) pv)->def_val;
+    case PLUGIN_VAR_INT | PLUGIN_VAR_THDLOCAL:
+      return &((thdvar_uint_t*) pv)->def_val;
+    case PLUGIN_VAR_LONG | PLUGIN_VAR_THDLOCAL:
+      return &((thdvar_ulong_t*) pv)->def_val;
+    case PLUGIN_VAR_LONGLONG | PLUGIN_VAR_THDLOCAL:
+      return &((thdvar_ulonglong_t*) pv)->def_val;
+    case PLUGIN_VAR_ENUM | PLUGIN_VAR_THDLOCAL:
+      return &((thdvar_enum_t*) pv)->def_val;
+    case PLUGIN_VAR_SET | PLUGIN_VAR_THDLOCAL:
+      return &((thdvar_set_t*) pv)->def_val;
+    case PLUGIN_VAR_BOOL | PLUGIN_VAR_THDLOCAL:
+      return &((thdvar_bool_t*) pv)->def_val;
+    case PLUGIN_VAR_STR | PLUGIN_VAR_THDLOCAL:
+      return &((thdvar_str_t*) pv)->def_val;
+    case PLUGIN_VAR_DOUBLE | PLUGIN_VAR_THDLOCAL:
+      return &((thdvar_double_t*) pv)->def_val;
+    default:
+      DBUG_ASSERT(0);
+      return NULL;
+    }
+}
+
+
 bool sys_var_pluginvar::global_update(THD *thd, set_var *var)
 {
   DBUG_ASSERT(!is_readonly());
@@ -3325,60 +3358,7 @@ bool sys_var_pluginvar::global_update(THD *thd, set_var *var)
   const void *src= &var->save_result;
 
   if (!var->value)
-  {
-    switch (plugin_var->flags & (PLUGIN_VAR_TYPEMASK | PLUGIN_VAR_THDLOCAL)) {
-    case PLUGIN_VAR_INT:
-      src= &((sysvar_uint_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_LONG:
-      src= &((sysvar_ulong_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_LONGLONG:
-      src= &((sysvar_ulonglong_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_ENUM:
-      src= &((sysvar_enum_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_SET:
-      src= &((sysvar_set_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_BOOL:
-      src= &((sysvar_bool_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_STR:
-      src= &((sysvar_str_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_DOUBLE:
-      src= &((sysvar_double_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_INT | PLUGIN_VAR_THDLOCAL:
-      src= &((thdvar_uint_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_LONG | PLUGIN_VAR_THDLOCAL:
-      src= &((thdvar_ulong_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_LONGLONG | PLUGIN_VAR_THDLOCAL:
-      src= &((thdvar_ulonglong_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_ENUM | PLUGIN_VAR_THDLOCAL:
-      src= &((thdvar_enum_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_SET | PLUGIN_VAR_THDLOCAL:
-      src= &((thdvar_set_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_BOOL | PLUGIN_VAR_THDLOCAL:
-      src= &((thdvar_bool_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_STR | PLUGIN_VAR_THDLOCAL:
-      src= &((thdvar_str_t*) plugin_var)->def_val;
-      break;
-    case PLUGIN_VAR_DOUBLE | PLUGIN_VAR_THDLOCAL:
-      src= &((thdvar_double_t*) plugin_var)->def_val;
-      break;
-    default:
-      DBUG_ASSERT(0);
-    }
-  }
+    src= var_def_ptr(plugin_var);
 
   plugin_var->update(thd, plugin_var, tgt, src);
   return false;
@@ -3734,7 +3714,18 @@ static int construct_options(MEM_ROOT *mem_root, struct st_plugin_int *tmp,
       *(int*)(opt + 1)= offset= v->offset;
 
       if (opt->flags & PLUGIN_VAR_NOCMDOPT)
+      {
+        char *val= global_system_variables.dynamic_variables_ptr + offset;
+        if (((opt->flags & PLUGIN_VAR_TYPEMASK) == PLUGIN_VAR_STR) &&
+             (opt->flags & PLUGIN_VAR_MEMALLOC))
+        {
+          char *def_val= *(char**)var_def_ptr(opt);
+          *(char**)val= def_val ? my_strdup(def_val, MYF(0)) : NULL;
+        }
+        else
+          memcpy(val, var_def_ptr(opt), var_storage_size(opt->flags));
         continue;
+      }
 
       optname= (char*) memdup_root(mem_root, v->key + 1,
                                    (optnamelen= v->name_len) + 1);
@@ -3942,10 +3933,11 @@ static int test_plugin_options(MEM_ROOT *tmp_root, struct st_plugin_int *tmp,
           *str->value= strdup_root(mem_root, *str->value);
       }
 
+      var= find_bookmark(plugin_name.str, o->name, o->flags);
       if (o->flags & PLUGIN_VAR_NOSYSVAR)
         continue;
       tmp_backup[tmp->nbackups++].save(&o->name);
-      if ((var= find_bookmark(plugin_name.str, o->name, o->flags)))
+      if (var)
         v= new (mem_root) sys_var_pluginvar(&chain, var->key + 1, o, tmp);
       else
       {

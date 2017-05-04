@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2014, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2015, MariaDB
+   Copyright (c) 2009, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -20,7 +20,6 @@
 #define MYSQL_LEX 1
 #include <my_global.h>
 #include "sql_priv.h"
-#include "unireg.h"                    // REQUIRED: for other includes
 #include "sql_class.h"                          // sql_lex.h: SQLCOM_END
 #include "sql_lex.h"
 #include "sql_parse.h"                          // add_to_list
@@ -568,6 +567,16 @@ void lex_end(LEX *lex)
   DBUG_ENTER("lex_end");
   DBUG_PRINT("enter", ("lex: 0x%lx", (long) lex));
 
+  lex_end_stage1(lex);
+  lex_end_stage2(lex);
+
+  DBUG_VOID_RETURN;
+}
+
+void lex_end_stage1(LEX *lex)
+{
+  DBUG_ENTER("lex_end_stage1");
+
   /* release used plugins */
   if (lex->plugins.elements) /* No function call and no mutex if no plugins. */
   {
@@ -579,6 +588,19 @@ void lex_end(LEX *lex)
   delete lex->sphead;
   lex->sphead= NULL;
 
+  DBUG_VOID_RETURN;
+}
+
+/*
+  MASTER INFO parameters (or state) is normally cleared towards the end
+  of a statement. But in case of PS, the state needs to be preserved during
+  its lifetime and should only be cleared on PS close or deallocation.
+*/
+void lex_end_stage2(LEX *lex)
+{
+  DBUG_ENTER("lex_end_stage2");
+
+  /* Reset LEX_MASTER_INFO */
   lex->mi.reset();
 
   DBUG_VOID_RETURN;
@@ -1079,7 +1101,7 @@ static int lex_one_token(YYSTYPE *yylval, THD *thd)
       state= (enum my_lex_states) state_map[c];
       break;
     case MY_LEX_ESCAPE:
-      if (lip->yyGet() == 'N')
+      if (!lip->eof() && lip->yyGet() == 'N')
       {					// Allow \N as shortcut for NULL
 	yylval->lex_str.str=(char*) "\\N";
 	yylval->lex_str.length=2;
@@ -1457,32 +1479,35 @@ static int lex_one_token(YYSTYPE *yylval, THD *thd)
       return (BIN_NUM);
 
     case MY_LEX_CMP_OP:			// Incomplete comparison operator
+      lip->next_state= MY_LEX_START;	// Allow signed numbers
       if (state_map[(uchar) lip->yyPeek()] == MY_LEX_CMP_OP ||
           state_map[(uchar) lip->yyPeek()] == MY_LEX_LONG_CMP_OP)
-        lip->yySkip();
-      if ((tokval = find_keyword(lip, lip->yyLength() + 1, 0)))
       {
-	lip->next_state= MY_LEX_START;	// Allow signed numbers
-	return(tokval);
+        lip->yySkip();
+        if ((tokval= find_keyword(lip, 2, 0)))
+          return(tokval);
+        lip->yyUnget();
       }
-      state = MY_LEX_CHAR;		// Something fishy found
-      break;
+      return(c);
 
     case MY_LEX_LONG_CMP_OP:		// Incomplete comparison operator
+      lip->next_state= MY_LEX_START;
       if (state_map[(uchar) lip->yyPeek()] == MY_LEX_CMP_OP ||
           state_map[(uchar) lip->yyPeek()] == MY_LEX_LONG_CMP_OP)
       {
         lip->yySkip();
         if (state_map[(uchar) lip->yyPeek()] == MY_LEX_CMP_OP)
+        {
           lip->yySkip();
+          if ((tokval= find_keyword(lip, 3, 0)))
+            return(tokval);
+          lip->yyUnget();
+        }
+        if ((tokval= find_keyword(lip, 2, 0)))
+          return(tokval);
+        lip->yyUnget();
       }
-      if ((tokval = find_keyword(lip, lip->yyLength() + 1, 0)))
-      {
-	lip->next_state= MY_LEX_START;	// Found long op
-	return(tokval);
-      }
-      state = MY_LEX_CHAR;		// Something fishy found
-      break;
+      return(c);
 
     case MY_LEX_BOOL:
       if (c != lip->yyPeek())
@@ -1910,7 +1935,6 @@ void st_select_lex::init_select()
   with_sum_func= 0;
   is_correlated= 0;
   cur_pos_in_select_list= UNDEF_POS;
-  non_agg_fields.empty();
   cond_value= having_value= Item::COND_UNDEF;
   inner_refs_list.empty();
   insert_tables= 0;
@@ -1918,6 +1942,8 @@ void st_select_lex::init_select()
   m_non_agg_field_used= false;
   m_agg_func_used= false;
   name_visibility_map= 0;
+  join= 0;
+  lock_type= TL_READ_DEFAULT;
 }
 
 /*
@@ -3132,6 +3158,9 @@ void LEX::first_lists_tables_same()
     if (query_tables_last == &first_table->next_global)
       query_tables_last= first_table->prev_global;
 
+    if (query_tables_own_last == &first_table->next_global)
+      query_tables_own_last= first_table->prev_global;
+
     if ((next= *first_table->prev_global= first_table->next_global))
       next->prev_global= first_table->prev_global;
     /* include in new place */
@@ -3457,12 +3486,28 @@ bool st_select_lex::add_index_hint (THD *thd, char *str, uint length)
 
 bool st_select_lex::optimize_unflattened_subqueries(bool const_only)
 {
-  for (SELECT_LEX_UNIT *un= first_inner_unit(); un; un= un->next_unit())
+  SELECT_LEX_UNIT *next_unit= NULL;
+  for (SELECT_LEX_UNIT *un= first_inner_unit();
+       un;
+       un= next_unit ? next_unit : un->next_unit())
   {
     Item_subselect *subquery_predicate= un->item;
-    
+    next_unit= NULL;
+
     if (subquery_predicate)
     {
+      if (!subquery_predicate->fixed)
+      {
+	/*
+	 This subquery was excluded as part of some expression so it is
+	 invisible from all prepared expression.
+       */
+	next_unit= un->next_unit();
+	un->exclude_level();
+	if (next_unit)
+	  continue;
+	break;
+      }
       if (subquery_predicate->substype() == Item_subselect::IN_SUBS)
       {
         Item_in_subselect *in_subs= (Item_in_subselect*) subquery_predicate;
@@ -3852,6 +3897,19 @@ void SELECT_LEX::update_used_tables()
       tl->on_expr->update_used_tables();
       tl->on_expr->walk(&Item::eval_not_null_tables, 0, NULL);
     }
+    /*
+      - There is no need to check sj_on_expr, because merged semi-joins inject
+        sj_on_expr into the parent's WHERE clase.
+      - For non-merged semi-joins (aka JTBMs), we need to check their
+        left_expr. There is no need to check the rest of the subselect, we know
+        it is uncorrelated and so cannot refer to any tables in this select.
+    */
+    if (tl->jtbm_subselect)
+    {
+      Item *left_expr= tl->jtbm_subselect->left_expr;
+      left_expr->walk(&Item::update_table_bitmaps_processor, FALSE, NULL);
+    }
+
     embedding= tl->embedding;
     while (embedding)
     {
@@ -4213,6 +4271,12 @@ bool st_select_lex::is_merged_child_of(st_select_lex *ancestor)
     if (subs && subs->type() == Item::SUBSELECT_ITEM && 
         ((Item_subselect*)subs)->substype() == Item_subselect::IN_SUBS &&
         ((Item_in_subselect*)subs)->test_strategy(SUBS_SEMI_JOIN))
+    {
+      continue;
+    }
+
+    if (sl->master_unit()->derived &&
+      sl->master_unit()->derived->is_merged_derived())
     {
       continue;
     }

@@ -2839,7 +2839,7 @@ int maria_repair(HA_CHECK *param, register MARIA_HA *info,
                                 (param->testflag & T_BACKUP_DATA ?
                                  MYF(MY_REDEL_MAKE_BACKUP): MYF(0)) |
                                 sync_dir) ||
-        _ma_open_datafile(info, share, NullS, -1))
+        _ma_open_datafile(info, share))
     {
       goto err;
     }
@@ -3105,7 +3105,7 @@ int maria_sort_index(HA_CHECK *param, register MARIA_HA *info, char *name)
   fn_format(param->temp_filename,name,"", MARIA_NAME_IEXT,2+4+32);
   if ((new_file=mysql_file_create(key_file_kfile, fn_format(param->temp_filename,param->temp_filename,
 				    "", INDEX_TMP_EXT,2+4),
-			  0,param->tmpfile_createflag,MYF(0))) <= 0)
+                                  0, param->tmpfile_createflag, MYF(0))) < 0)
   {
     _ma_check_print_error(param,"Can't create new tempfile: '%s'",
 			 param->temp_filename);
@@ -3994,7 +3994,7 @@ int maria_repair_by_sort(HA_CHECK *param, register MARIA_HA *info,
                                   (param->testflag & T_BACKUP_DATA ?
                                    MYF(MY_REDEL_MAKE_BACKUP): MYF(0)) |
                                   sync_dir) ||
-          _ma_open_datafile(info, share, NullS, -1))
+          _ma_open_datafile(info, share))
       {
         _ma_check_print_error(param, "Couldn't change to new data file");
         goto err;
@@ -4627,7 +4627,7 @@ err:
                                   MYF((param->testflag & T_BACKUP_DATA ?
                                        MY_REDEL_MAKE_BACKUP : 0) |
                                       sync_dir)) ||
-	  _ma_open_datafile(info,share, NullS, -1))
+	  _ma_open_datafile(info,share))
 	got_error=1;
     }
   }

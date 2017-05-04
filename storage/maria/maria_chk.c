@@ -1054,7 +1054,7 @@ static int maria_chk(HA_CHECK *param, char *filename)
       error= 1;
       goto end2;
     }
-    /* We can't do parallell repair with BLOCK_RECORD yet */
+    /* We can't do parallel repair with BLOCK_RECORD yet */
     if (param->testflag & T_REP_PARALLEL)
     {
       param->testflag&= ~T_REP_PARALLEL;
@@ -1275,7 +1275,7 @@ static int maria_chk(HA_CHECK *param, char *filename)
         mysql_file_close(info->dfile.file, MYF(MY_WME)); /* Close new file */
         error|=maria_change_to_newfile(filename,MARIA_NAME_DEXT,DATA_TMP_EXT,
                                        0, MYF(0));
-        if (_ma_open_datafile(info,info->s, NullS, -1))
+        if (_ma_open_datafile(info, info->s))
           error=1;
         param->out_flag&= ~O_NEW_DATA; /* We are using new datafile */
         param->read_cache.file= info->dfile.file;

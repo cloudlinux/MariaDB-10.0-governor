@@ -1,6 +1,7 @@
 /*****************************************************************************
 
-Copyright (c) 1994, 2013, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1994, 2016, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2013, 2017, MariaDB Corporation.
 Copyright (c) 2008, Google Inc.
 
 Portions of this file contain modifications contributed and copyrighted by
@@ -44,10 +45,10 @@ Created 1/20/1994 Heikki Tuuri
 
 #define INNODB_VERSION_MAJOR	5
 #define INNODB_VERSION_MINOR	6
-#define INNODB_VERSION_BUGFIX	24
+#define INNODB_VERSION_BUGFIX	35
 
 #ifndef PERCONA_INNODB_VERSION
-#define PERCONA_INNODB_VERSION 72.2
+#define PERCONA_INNODB_VERSION 80.0
 #endif
 
 /* Enable UNIV_LOG_ARCHIVE in XtraDB */
@@ -183,7 +184,7 @@ command. Not tested on Windows. */
 #define UNIV_COMPILE_TEST_FUNCS
 */
 
-#if defined(HAVE_valgrind)&& defined(HAVE_VALGRIND_MEMCHECK_H)
+#if defined HAVE_valgrind && defined HAVE_VALGRIND
 # define UNIV_DEBUG_VALGRIND
 #endif
 #if 0
@@ -260,8 +261,9 @@ operations (very slow); also UNIV_DEBUG must be defined */
 that are only referenced from within InnoDB, not from MySQL. We disable the
 GCC visibility directive on all Sun operating systems because there is no
 easy way to get it to work. See http://bugs.mysql.com/bug.php?id=52263. */
+#define MY_ATTRIBUTE __attribute__
 #if defined(__GNUC__) && (__GNUC__ >= 4) && !defined(sun) || defined(__INTEL_COMPILER)
-# define UNIV_INTERN __attribute__((visibility ("hidden")))
+# define UNIV_INTERN MY_ATTRIBUTE((visibility ("hidden")))
 #else
 # define UNIV_INTERN
 #endif
@@ -276,7 +278,7 @@ appears close together improving code locality of non-cold parts of
 program.  The paths leading to call of cold functions within code are
 marked as unlikely by the branch prediction mechanism.  optimize a
 rarely invoked function for size instead for speed. */
-# define UNIV_COLD __attribute__((cold))
+# define UNIV_COLD MY_ATTRIBUTE((cold))
 #else
 # define UNIV_COLD /* empty */
 #endif
@@ -549,7 +551,7 @@ contains the sum of the following flag and the locally stored len. */
 #if defined(__GNUC__) && (__GNUC__ > 2) && ! defined(__INTEL_COMPILER)
 #define HAVE_GCC_GT_2
 /* Tell the compiler that variable/function is unused. */
-# define UNIV_UNUSED    __attribute__ ((unused))
+# define UNIV_UNUSED    MY_ATTRIBUTE ((unused))
 #else
 # define UNIV_UNUSED
 #endif /* CHECK FOR GCC VER_GT_2 */
@@ -611,6 +613,7 @@ Windows, so define a typedef for it and a macro to use at the end of such
 functions. */
 
 #ifdef __WIN__
+#define usleep(a) Sleep((a)/1000)
 typedef ulint os_thread_ret_t;
 #define OS_THREAD_DUMMY_RETURN return(0)
 #else

@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2013, Monty Program Ab.
+   Copyright (c) 2010, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -92,7 +92,7 @@
 
 static void add_load_option(DYNAMIC_STRING *str, const char *option,
                              const char *option_value);
-static ulong find_set(TYPELIB *lib, const char *x, uint length,
+static ulong find_set(TYPELIB *lib, const char *x, size_t length,
                       char **err_pos, uint *err_len);
 static char *alloc_query_str(ulong size);
 
@@ -148,6 +148,12 @@ static int   first_error=0;
 */
 static uint multi_source= 0;
 static DYNAMIC_STRING extended_row;
+static DYNAMIC_STRING dynamic_where;
+static MYSQL_RES *get_table_name_result= NULL;
+static MEM_ROOT glob_root;
+static MYSQL_RES *routine_res, *routine_list_res;
+
+
 #include <sslopt-vars.h>
 FILE *md_result_file= 0;
 FILE *stderror_file=0;
@@ -569,9 +575,7 @@ static int dump_all_tablespaces();
 static int dump_tablespaces_for_tables(char *db, char **table_names, int tables);
 static int dump_tablespaces_for_databases(char** databases);
 static int dump_tablespaces(char* ts_where);
-static void print_comment(FILE *sql_file, my_bool is_error, const char *format,
-                          ...);
-
+static void print_comment(FILE *, my_bool, const char *, ...);
 
 /*
   Print the supplied message if in verbose mode
@@ -649,6 +653,30 @@ static void short_usage(FILE *f)
 }
 
 
+/** returns a string fixed to be safely printed inside a -- comment
+
+  that is, any new line in it gets prefixed with --
+*/
+static const char *fix_for_comment(const char *ident)
+{
+  static char buf[1024];
+  char c, *s= buf;
+
+  while ((c= *s++= *ident++))
+  {
+    if (s >= buf + sizeof(buf) - 10)
+    {
+      strmov(s, "...");
+      break;
+    }
+    if (c == '\n')
+      s= strmov(s, "-- ");
+  }
+
+  return buf;
+}
+
+
 static void write_header(FILE *sql_file, char *db_name)
 {
   if (opt_xml)
@@ -670,9 +698,10 @@ static void write_header(FILE *sql_file, char *db_name)
                   "-- MySQL dump %s  Distrib %s, for %s (%s)\n--\n",
                   DUMP_VERSION, MYSQL_SERVER_VERSION, SYSTEM_TYPE,
                   MACHINE_TYPE);
-    print_comment(sql_file, 0, "-- Host: %s    Database: %s\n",
-                  current_host ? current_host : "localhost",
-                  db_name ? db_name : "");
+    print_comment(sql_file, 0, "-- Host: %s    ",
+                  fix_for_comment(current_host ? current_host : "localhost"));
+    print_comment(sql_file, 0, "Database: %s\n",
+                  fix_for_comment(db_name ? db_name : ""));
     print_comment(sql_file, 0,
                   "-- ------------------------------------------------------\n"
                  );
@@ -884,7 +913,7 @@ get_one_option(int optid, const struct my_option *opt __attribute__((unused)),
       opt_set_charset= 0;
       opt_compatible_mode_str= argument;
       opt_compatible_mode= find_set(&compatible_mode_typelib,
-                                    argument, (uint) strlen(argument),
+                                    argument, strlen(argument),
                                     &err_ptr, &err_len);
       if (err_len)
       {
@@ -894,7 +923,7 @@ get_one_option(int optid, const struct my_option *opt __attribute__((unused)),
       }
 #if !defined(DBUG_OFF)
       {
-        uint size_for_sql_mode= 0;
+        size_t size_for_sql_mode= 0;
         const char **ptr;
         for (ptr= compatible_mode_names; *ptr; ptr++)
           size_for_sql_mode+= strlen(*ptr);
@@ -1138,16 +1167,14 @@ static int fetch_db_collation(const char *db_name,
                               int db_cl_size)
 {
   my_bool err_status= FALSE;
-  char query[QUERY_LENGTH];
   MYSQL_RES *db_cl_res;
   MYSQL_ROW db_cl_row;
-  char quoted_database_buf[NAME_LEN*2+3];
-  char *qdatabase= quote_name(db_name, quoted_database_buf, 1);
 
-  my_snprintf(query, sizeof (query), "use %s", qdatabase);
-
-  if (mysql_query_with_error_report(mysql, NULL, query))
-    return 1;
+  if (mysql_select_db(mysql, db_name))
+  {
+    DB_error(mysql, "when selecting the database");
+    return 1;                   /* If --force */
+  }
 
   if (mysql_query_with_error_report(mysql, &db_cl_res,
                                     "select @@collation_database"))
@@ -1167,8 +1194,8 @@ static int fetch_db_collation(const char *db_name,
       break;
     }
 
-    strncpy(db_cl_name, db_cl_row[0], db_cl_size);
-    db_cl_name[db_cl_size - 1]= 0; /* just in case. */
+    strncpy(db_cl_name, db_cl_row[0], db_cl_size-1);
+    db_cl_name[db_cl_size - 1]= 0;
 
   } while (FALSE);
 
@@ -1301,7 +1328,7 @@ get_gtid_pos(char *out_gtid_pos, int master)
 
 
 static char *my_case_str(const char *str,
-                         uint str_len,
+                         size_t str_len,
                          const char *token,
                          uint token_len)
 {
@@ -1517,7 +1544,7 @@ static int switch_character_set_results(MYSQL *mysql, const char *cs_name)
 */
 
 static char *cover_definer_clause(const char *stmt_str,
-                                  uint stmt_length,
+                                  size_t stmt_length,
                                   const char *definer_version_str,
                                   uint definer_version_length,
                                   const char *stmt_version_str,
@@ -1585,14 +1612,26 @@ static void free_resources()
 {
   if (md_result_file && md_result_file != stdout)
     my_fclose(md_result_file, MYF(0));
+  if (get_table_name_result)
+    mysql_free_result(get_table_name_result);
+  if (routine_res)
+    mysql_free_result(routine_res);
+  if (routine_list_res)
+    mysql_free_result(routine_list_res);
+  if (mysql)
+  {
+    mysql_close(mysql);
+    mysql= 0;
+  }
+  my_free(order_by);
   my_free(opt_password);
   my_free(current_host);
+  free_root(&glob_root, MYF(0));
   if (my_hash_inited(&ignore_table))
     my_hash_free(&ignore_table);
-  if (extended_insert)
-    dynstr_free(&extended_row);
-  if (insert_pat_inited)
-    dynstr_free(&insert_pat);
+  dynstr_free(&extended_row);
+  dynstr_free(&dynamic_where);
+  dynstr_free(&insert_pat);
   if (defaults_argv)
     free_defaults(defaults_argv);
   mysql_library_end();
@@ -1609,8 +1648,6 @@ static void maybe_exit(int error)
   ignore_errors= 1; /* don't want to recurse, if something fails below */
   if (opt_slave_data)
     do_start_slave_sql(mysql);
-  if (mysql)
-    mysql_close(mysql);
   free_resources();
   exit(error);
 }
@@ -1703,17 +1740,18 @@ static void dbDisconnect(char *host)
 {
   verbose_msg("-- Disconnecting from %s...\n", host ? host : "localhost");
   mysql_close(mysql);
+  mysql= 0;
 } /* dbDisconnect */
 
 
-static void unescape(FILE *file,char *pos,uint length)
+static void unescape(FILE *file,char *pos, size_t length)
 {
   char *tmp;
   DBUG_ENTER("unescape");
   if (!(tmp=(char*) my_malloc(length*2+1, MYF(MY_WME))))
     die(EX_MYSQLERR, "Couldn't allocate memory");
 
-  mysql_real_escape_string(&mysql_connection, tmp, pos, length);
+  mysql_real_escape_string(&mysql_connection, tmp, pos, (ulong)length);
   fputc('\'', file);
   fputs(tmp, file);
   fputc('\'', file);
@@ -1827,7 +1865,7 @@ static char *quote_for_like(const char *name, char *buff)
     Quote '<' '>' '&' '\"' chars and print a string to the xml_file.
 */
 
-static void print_quoted_xml(FILE *xml_file, const char *str, ulong len,
+static void print_quoted_xml(FILE *xml_file, const char *str, size_t len,
                              my_bool is_attribute_name)
 {
   const char *end;
@@ -2088,7 +2126,7 @@ static void print_xml_row(FILE *xml_file, const char *row_name,
     squeezed to a single hyphen.
 */
 
-static void print_xml_comment(FILE *xml_file, ulong len,
+static void print_xml_comment(FILE *xml_file, size_t len,
                               const char *comment_string)
 {
   const char* end;
@@ -2205,11 +2243,12 @@ static uint dump_events_for_db(char *db)
   DBUG_ENTER("dump_events_for_db");
   DBUG_PRINT("enter", ("db: '%s'", db));
 
-  mysql_real_escape_string(mysql, db_name_buff, db, strlen(db));
+  mysql_real_escape_string(mysql, db_name_buff, db, (ulong)strlen(db));
 
   /* nice comments */
   print_comment(sql_file, 0,
-                "\n--\n-- Dumping events for database '%s'\n--\n", db);
+                "\n--\n-- Dumping events for database '%s'\n--\n",
+                fix_for_comment(db));
 
   /*
     not using "mysql_query_with_error_report" because we may have not
@@ -2324,6 +2363,7 @@ static uint dump_events_for_db(char *db)
                   (const char *) (query_str != NULL ? query_str : row[3]),
                   (const char *) delimiter);
 
+          my_free(query_str);
           restore_time_zone(sql_file, delimiter);
           restore_sql_mode(sql_file, delimiter);
 
@@ -2408,7 +2448,6 @@ static uint dump_routines_for_db(char *db)
   char       *routine_name;
   int        i;
   FILE       *sql_file= md_result_file;
-  MYSQL_RES  *routine_res, *routine_list_res;
   MYSQL_ROW  row, routine_list_row;
 
   char       db_cl_name[MY_CS_NAME_SIZE];
@@ -2417,11 +2456,12 @@ static uint dump_routines_for_db(char *db)
   DBUG_ENTER("dump_routines_for_db");
   DBUG_PRINT("enter", ("db: '%s'", db));
 
-  mysql_real_escape_string(mysql, db_name_buff, db, strlen(db));
+  mysql_real_escape_string(mysql, db_name_buff, db, (ulong)strlen(db));
 
   /* nice comments */
   print_comment(sql_file, 0,
-                "\n--\n-- Dumping routines for database '%s'\n--\n", db);
+                "\n--\n-- Dumping routines for database '%s'\n--\n",
+                fix_for_comment(db));
 
   /*
     not using "mysql_query_with_error_report" because we may have not
@@ -2432,7 +2472,7 @@ static uint dump_routines_for_db(char *db)
 
   /* Get database collation. */
 
-  if (fetch_db_collation(db_name_buff, db_cl_name, sizeof (db_cl_name)))
+  if (fetch_db_collation(db, db_cl_name, sizeof (db_cl_name)))
     DBUG_RETURN(1);
 
   if (switch_character_set_results(mysql, "binary"))
@@ -2463,7 +2503,11 @@ static uint dump_routines_for_db(char *db)
                     routine_type[i], routine_name);
 
         if (mysql_query_with_error_report(mysql, &routine_res, query_buff))
+        {
+          mysql_free_result(routine_list_res);
+          routine_list_res= 0;
           DBUG_RETURN(1);
+        }
 
         while ((row= mysql_fetch_row(routine_res)))
         {
@@ -2471,9 +2515,9 @@ static uint dump_routines_for_db(char *db)
             if the user has EXECUTE privilege he see routine names, but NOT the
             routine body of other routines that are not the creator of!
           */
-          DBUG_PRINT("info",("length of body for %s row[2] '%s' is %d",
+          DBUG_PRINT("info",("length of body for %s row[2] '%s' is %zu",
                              routine_name, row[2] ? row[2] : "(null)",
-                             row[2] ? (int) strlen(row[2]) : 0));
+                             row[2] ? strlen(row[2]) : 0));
           if (row[2] == NULL)
           {
             print_comment(sql_file, 1, "\n-- insufficient privileges to %s\n",
@@ -2481,7 +2525,8 @@ static uint dump_routines_for_db(char *db)
             print_comment(sql_file, 1,
                           "-- does %s have permissions on mysql.proc?\n\n",
                           current_user);
-            maybe_die(EX_MYSQLERR,"%s has insufficent privileges to %s!", current_user, query_buff);
+            maybe_die(EX_MYSQLERR,"%s has insufficent privileges to %s!",
+                      current_user, query_buff);
           }
           else if (strlen(row[2]))
           {
@@ -2501,9 +2546,12 @@ static uint dump_routines_for_db(char *db)
 
             if (mysql_num_fields(routine_res) >= 6)
             {
-              if (switch_db_collation(sql_file, db_name_buff, ";",
+              if (switch_db_collation(sql_file, db, ";",
                                       db_cl_name, row[5], &db_cl_altered))
               {
+                mysql_free_result(routine_res);
+                mysql_free_result(routine_list_res);
+                routine_res= routine_list_res= 0;
                 DBUG_RETURN(1);
               }
 
@@ -2548,18 +2596,25 @@ static uint dump_routines_for_db(char *db)
 
               if (db_cl_altered)
               {
-                if (restore_db_collation(sql_file, db_name_buff, ";", db_cl_name))
+                if (restore_db_collation(sql_file, db, ";", db_cl_name))
+                {
+                  mysql_free_result(routine_res);
+                  mysql_free_result(routine_list_res);
+                  routine_res= routine_list_res= 0;
                   DBUG_RETURN(1);
+                }
               }
             }
 
           }
         } /* end of routine printing */
         mysql_free_result(routine_res);
+        routine_res= 0;
 
       } /* end of list of routines */
     }
     mysql_free_result(routine_list_res);
+    routine_list_res= 0;
   } /* end of for i (0 .. 1)  */
 
   if (opt_xml)
@@ -2681,24 +2736,31 @@ static uint get_table_structure(char *table, char *db, char *table_type,
       if (switch_character_set_results(mysql, "binary") ||
           mysql_query_with_error_report(mysql, &result, buff) ||
           switch_character_set_results(mysql, default_charset))
+      {
+        my_free(order_by);
+        order_by= 0;
         DBUG_RETURN(0);
+      }
 
       if (path)
       {
         if (!(sql_file= open_sql_file_for_table(table, O_WRONLY)))
+        {
+          my_free(order_by);
+          order_by= 0;
           DBUG_RETURN(0);
-
+        }
         write_header(sql_file, db);
       }
 
       if (strcmp (table_type, "VIEW") == 0)         /* view */
         print_comment(sql_file, 0,
                       "\n--\n-- Temporary table structure for view %s\n--\n\n",
-                      result_table);
+                      fix_for_comment(result_table));
       else
         print_comment(sql_file, 0,
                       "\n--\n-- Table structure for table %s\n--\n\n",
-                      result_table);
+                      fix_for_comment(result_table));
 
       if (opt_drop)
       {
@@ -2940,7 +3002,7 @@ static uint get_table_structure(char *table, char *db, char *table_type,
 
       print_comment(sql_file, 0,
                     "\n--\n-- Table structure for table %s\n--\n\n",
-                    result_table);
+                    fix_for_comment(result_table));
       if (opt_drop)
         fprintf(sql_file, "DROP TABLE IF EXISTS %s;\n", result_table);
       if (!opt_xml)
@@ -3257,10 +3319,6 @@ static int dump_trigger(FILE *sql_file, MYSQL_RES *show_create_trigger_rs,
       continue;
     }
 
-    query_str= cover_definer_clause(row[2], strlen(row[2]),
-                                    C_STRING_WITH_LEN("50017"),
-                                    C_STRING_WITH_LEN("50003"),
-                                    C_STRING_WITH_LEN(" TRIGGER"));
     if (switch_db_collation(sql_file, db_name, ";",
                             db_cl_name, row[5], &db_cl_altered))
       DBUG_RETURN(TRUE);
@@ -3272,11 +3330,17 @@ static int dump_trigger(FILE *sql_file, MYSQL_RES *show_create_trigger_rs,
 
     switch_sql_mode(sql_file, ";", row[1]);
 
+    query_str= cover_definer_clause(row[2], strlen(row[2]),
+                                    C_STRING_WITH_LEN("50017"),
+                                    C_STRING_WITH_LEN("50003"),
+                                    C_STRING_WITH_LEN(" TRIGGER"));
     fprintf(sql_file,
             "DELIMITER ;;\n"
             "/*!50003 %s */;;\n"
             "DELIMITER ;\n",
             (const char *) (query_str != NULL ? query_str : row[2]));
+
+    my_free(query_str);
 
     restore_sql_mode(sql_file, ";");
     restore_cs_variables(sql_file, ";");
@@ -3286,8 +3350,6 @@ static int dump_trigger(FILE *sql_file, MYSQL_RES *show_create_trigger_rs,
       if (restore_db_collation(sql_file, db_name, ";", db_cl_name))
         DBUG_RETURN(TRUE);
     }
-
-    my_free(query_str);
   }
 
   DBUG_RETURN(FALSE);
@@ -3378,13 +3440,14 @@ static int dump_triggers_for_table(char *table_name, char *db_name)
     {
       MYSQL_RES *show_create_trigger_rs= mysql_store_result(mysql);
 
-      if (!show_create_trigger_rs ||
-          dump_trigger(sql_file, show_create_trigger_rs, db_name, db_cl_name))
-        goto done;
-
+      int error= (!show_create_trigger_rs ||
+                  dump_trigger(sql_file, show_create_trigger_rs, db_name,
+                               db_cl_name));
       mysql_free_result(show_create_trigger_rs);
+      if (error)
+        goto done;
     }
-
+    
   }
 
   if (opt_xml)
@@ -3631,12 +3694,14 @@ static void dump_table(char *table, char *db)
     {
       dynstr_append_checked(&query_string, " ORDER BY ");
       dynstr_append_checked(&query_string, order_by);
+      my_free(order_by);
+      order_by= 0;
     }
 
     if (mysql_real_query(mysql, query_string.str, query_string.length))
     {
-      DB_error(mysql, "when executing 'SELECT INTO OUTFILE'");
       dynstr_free(&query_string);
+      DB_error(mysql, "when executing 'SELECT INTO OUTFILE'");
       DBUG_VOID_RETURN;
     }
   }
@@ -3644,24 +3709,26 @@ static void dump_table(char *table, char *db)
   {
     print_comment(md_result_file, 0,
                   "\n--\n-- Dumping data for table %s\n--\n",
-                  result_table);
+                  fix_for_comment(result_table));
     
     dynstr_append_checked(&query_string, "SELECT /*!40001 SQL_NO_CACHE */ * FROM ");
     dynstr_append_checked(&query_string, result_table);
 
     if (where)
     {
-      print_comment(md_result_file, 0, "-- WHERE:  %s\n", where);
+      print_comment(md_result_file, 0, "-- WHERE:  %s\n", fix_for_comment(where));
 
       dynstr_append_checked(&query_string, " WHERE ");
       dynstr_append_checked(&query_string, where);
     }
     if (order_by)
     {
-      print_comment(md_result_file, 0, "-- ORDER BY:  %s\n", order_by);
+      print_comment(md_result_file, 0, "-- ORDER BY:  %s\n", fix_for_comment(order_by));
 
       dynstr_append_checked(&query_string, " ORDER BY ");
       dynstr_append_checked(&query_string, order_by);
+      my_free(order_by);
+      order_by= 0;
     }
 
     if (!opt_xml && !opt_compact)
@@ -3671,6 +3738,7 @@ static void dump_table(char *table, char *db)
     }
     if (mysql_query_with_error_report(mysql, 0, query_string.str))
     {
+      dynstr_free(&query_string);
       DB_error(mysql, "when retrieving data from server");
       goto err;
     }
@@ -3680,6 +3748,7 @@ static void dump_table(char *table, char *db)
       res=mysql_store_result(mysql);
     if (!res)
     {
+      dynstr_free(&query_string);
       DB_error(mysql, "when retrieving data from server");
       goto err;
     }
@@ -3995,23 +4064,22 @@ err:
 
 static char *getTableName(int reset)
 {
-  static MYSQL_RES *res= NULL;
-  MYSQL_ROW    row;
+  MYSQL_ROW row;
 
-  if (!res)
+  if (!get_table_name_result)
   {
-    if (!(res= mysql_list_tables(mysql,NullS)))
+    if (!(get_table_name_result= mysql_list_tables(mysql,NullS)))
       return(NULL);
   }
-  if ((row= mysql_fetch_row(res)))
+  if ((row= mysql_fetch_row(get_table_name_result)))
     return((char*) row[0]);
 
   if (reset)
-    mysql_data_seek(res,0);      /* We want to read again */
+    mysql_data_seek(get_table_name_result,0);      /* We want to read again */
   else
   {
-    mysql_free_result(res);
-    res= NULL;
+    mysql_free_result(get_table_name_result);
+    get_table_name_result= NULL;
   }
   return(NULL);
 } /* getTableName */
@@ -4028,46 +4096,44 @@ static int dump_all_tablespaces()
 
 static int dump_tablespaces_for_tables(char *db, char **table_names, int tables)
 {
-  DYNAMIC_STRING where;
   int r;
   int i;
   char name_buff[NAME_LEN*2+3];
 
-  mysql_real_escape_string(mysql, name_buff, db, strlen(db));
+  mysql_real_escape_string(mysql, name_buff, db, (ulong)strlen(db));
 
-  init_dynamic_string_checked(&where, " AND TABLESPACE_NAME IN ("
+  init_dynamic_string_checked(&dynamic_where, " AND TABLESPACE_NAME IN ("
                       "SELECT DISTINCT TABLESPACE_NAME FROM"
                       " INFORMATION_SCHEMA.PARTITIONS"
                       " WHERE"
                       " TABLE_SCHEMA='", 256, 1024);
-  dynstr_append_checked(&where, name_buff);
-  dynstr_append_checked(&where, "' AND TABLE_NAME IN (");
+  dynstr_append_checked(&dynamic_where, name_buff);
+  dynstr_append_checked(&dynamic_where, "' AND TABLE_NAME IN (");
 
   for (i=0 ; i<tables ; i++)
   {
     mysql_real_escape_string(mysql, name_buff,
-                             table_names[i], strlen(table_names[i]));
+                             table_names[i], (ulong)strlen(table_names[i]));
 
-    dynstr_append_checked(&where, "'");
-    dynstr_append_checked(&where, name_buff);
-    dynstr_append_checked(&where, "',");
+    dynstr_append_checked(&dynamic_where, "'");
+    dynstr_append_checked(&dynamic_where, name_buff);
+    dynstr_append_checked(&dynamic_where, "',");
   }
-  dynstr_trunc(&where, 1);
-  dynstr_append_checked(&where,"))");
+  dynstr_trunc(&dynamic_where, 1);
+  dynstr_append_checked(&dynamic_where,"))");
 
-  DBUG_PRINT("info",("Dump TS for Tables where: %s",where.str));
-  r= dump_tablespaces(where.str);
-  dynstr_free(&where);
+  DBUG_PRINT("info",("Dump TS for Tables where: %s",dynamic_where.str));
+  r= dump_tablespaces(dynamic_where.str);
+  dynstr_free(&dynamic_where);
   return r;
 }
 
 static int dump_tablespaces_for_databases(char** databases)
 {
-  DYNAMIC_STRING where;
   int r;
   int i;
 
-  init_dynamic_string_checked(&where, " AND TABLESPACE_NAME IN ("
+  init_dynamic_string_checked(&dynamic_where, " AND TABLESPACE_NAME IN ("
                       "SELECT DISTINCT TABLESPACE_NAME FROM"
                       " INFORMATION_SCHEMA.PARTITIONS"
                       " WHERE"
@@ -4077,17 +4143,17 @@ static int dump_tablespaces_for_databases(char** databases)
   {
     char db_name_buff[NAME_LEN*2+3];
     mysql_real_escape_string(mysql, db_name_buff,
-                             databases[i], strlen(databases[i]));
-    dynstr_append_checked(&where, "'");
-    dynstr_append_checked(&where, db_name_buff);
-    dynstr_append_checked(&where, "',");
+                             databases[i], (ulong)strlen(databases[i]));
+    dynstr_append_checked(&dynamic_where, "'");
+    dynstr_append_checked(&dynamic_where, db_name_buff);
+    dynstr_append_checked(&dynamic_where, "',");
   }
-  dynstr_trunc(&where, 1);
-  dynstr_append_checked(&where,"))");
+  dynstr_trunc(&dynamic_where, 1);
+  dynstr_append_checked(&dynamic_where,"))");
 
-  DBUG_PRINT("info",("Dump TS for DBs where: %s",where.str));
-  r= dump_tablespaces(where.str);
-  dynstr_free(&where);
+  DBUG_PRINT("info",("Dump TS for DBs where: %s",dynamic_where.str));
+  r= dump_tablespaces(dynamic_where.str);
+  dynstr_free(&dynamic_where);
   return r;
 }
 
@@ -4167,7 +4233,7 @@ static int dump_tablespaces(char* ts_where)
     if (first)
     {
       print_comment(md_result_file, 0, "\n--\n-- Logfile group: %s\n--\n",
-                    row[0]);
+                    fix_for_comment(row[0]));
 
       fprintf(md_result_file, "\nCREATE");
     }
@@ -4236,7 +4302,8 @@ static int dump_tablespaces(char* ts_where)
       first= 1;
     if (first)
     {
-      print_comment(md_result_file, 0, "\n--\n-- Tablespace: %s\n--\n", row[0]);
+      print_comment(md_result_file, 0, "\n--\n-- Tablespace: %s\n--\n",
+                    fix_for_comment(row[0]));
       fprintf(md_result_file, "\nCREATE");
     }
     else
@@ -4440,7 +4507,8 @@ static int init_dumping(char *database, int init_func(char*))
       char *qdatabase= quote_name(database,quoted_database_buf,opt_quoted);
 
       print_comment(md_result_file, 0,
-                    "\n--\n-- Current Database: %s\n--\n", qdatabase);
+                    "\n--\n-- Current Database: %s\n--\n",
+                    fix_for_comment(qdatabase));
 
       /* Call the view or table specific function */
       init_func(qdatabase);
@@ -4495,9 +4563,12 @@ static int dump_all_tables_in_db(char *database)
       }
     }
     if (numrows && mysql_real_query(mysql, query.str, query.length-1))
+    {
+      dynstr_free(&query);
       DB_error(mysql, "when using LOCK TABLES");
-            /* We shall continue here, if --force was given */
-    dynstr_free(&query);
+      /* We shall continue here, if --force was given */
+    }
+    dynstr_free(&query);                        /* Safe to call twice */
   }
   if (flush_logs)
   {
@@ -4511,7 +4582,9 @@ static int dump_all_tables_in_db(char *database)
   {
     verbose_msg("-- Setting savepoint...\n");
     if (mysql_query_with_error_report(mysql, 0, "SAVEPOINT sp"))
+    {
       DBUG_RETURN(1);
+    }
   }
   while ((table= getTableName(0)))
   {
@@ -4746,22 +4819,22 @@ static int dump_selected_tables(char *db, char **table_names, int tables)
 {
   char table_buff[NAME_LEN*2+3];
   DYNAMIC_STRING lock_tables_query;
-  MEM_ROOT root;
   char **dump_tables, **pos, **end;
   DBUG_ENTER("dump_selected_tables");
 
   if (init_dumping(db, init_dumping_tables))
     DBUG_RETURN(1);
 
-  init_alloc_root(&root, 8192, 0, MYF(0));
-  if (!(dump_tables= pos= (char**) alloc_root(&root, tables * sizeof(char *))))
+  init_alloc_root(&glob_root, 8192, 0, MYF(0));
+  if (!(dump_tables= pos= (char**) alloc_root(&glob_root,
+                                              tables * sizeof(char *))))
      die(EX_EOM, "alloc_root failure.");
 
   init_dynamic_string_checked(&lock_tables_query, "LOCK TABLES ", 256, 1024);
   for (; tables > 0 ; tables-- , table_names++)
   {
     /* the table name passed on commandline may be wrong case */
-    if ((*pos= get_actual_table_name(*table_names, &root)))
+    if ((*pos= get_actual_table_name(*table_names, &glob_root)))
     {
       /* Add found table name to lock_tables_query */
       if (lock_tables)
@@ -4776,7 +4849,7 @@ static int dump_selected_tables(char *db, char **table_names, int tables)
       if (!ignore_errors)
       {
         dynstr_free(&lock_tables_query);
-        free_root(&root, MYF(0));
+        free_root(&glob_root, MYF(0));
       }
       maybe_die(EX_ILLEGAL_TABLE, "Couldn't find table: \"%s\"", *table_names);
       /* We shall countinue here, if --force was given */
@@ -4797,7 +4870,7 @@ static int dump_selected_tables(char *db, char **table_names, int tables)
       if (!ignore_errors)
       {
         dynstr_free(&lock_tables_query);
-        free_root(&root, MYF(0));
+        free_root(&glob_root, MYF(0));
       }
       DB_error(mysql, "when doing LOCK TABLES");
        /* We shall countinue here, if --force was given */
@@ -4809,7 +4882,7 @@ static int dump_selected_tables(char *db, char **table_names, int tables)
     if (mysql_refresh(mysql, REFRESH_LOG))
     {
       if (!ignore_errors)
-        free_root(&root, MYF(0));
+        free_root(&glob_root, MYF(0));
       DB_error(mysql, "when doing refresh");
     }
      /* We shall countinue here, if --force was given */
@@ -4823,7 +4896,10 @@ static int dump_selected_tables(char *db, char **table_names, int tables)
   {
     verbose_msg("-- Setting savepoint...\n");
     if (mysql_query_with_error_report(mysql, 0, "SAVEPOINT sp"))
+    {
+      free_root(&glob_root, MYF(0));
       DBUG_RETURN(1);
+    }
   }
 
   /* Dump each selected table */
@@ -4838,6 +4914,8 @@ static int dump_selected_tables(char *db, char **table_names, int tables)
       {
         if (path)
           my_fclose(md_result_file, MYF(MY_WME));
+        if (!ignore_errors)
+          free_root(&glob_root, MYF(0));
         maybe_exit(EX_MYSQLERR);
       }
     }
@@ -4856,7 +4934,11 @@ static int dump_selected_tables(char *db, char **table_names, int tables)
     {
       verbose_msg("-- Rolling back to savepoint sp...\n");
       if (mysql_query_with_error_report(mysql, 0, "ROLLBACK TO SAVEPOINT sp"))
+      {
+        if (!ignore_errors)
+          free_root(&glob_root, MYF(0));
         maybe_exit(EX_MYSQLERR);
+      }
     }
   }
 
@@ -4864,8 +4946,10 @@ static int dump_selected_tables(char *db, char **table_names, int tables)
   {
     verbose_msg("-- Releasing savepoint...\n");
     if (mysql_query_with_error_report(mysql, 0, "RELEASE SAVEPOINT sp"))
+    {
+      free_root(&glob_root, MYF(0));
       DBUG_RETURN(1);
-
+    }
   }
 
   /* Dump each selected view */
@@ -4885,9 +4969,7 @@ static int dump_selected_tables(char *db, char **table_names, int tables)
     DBUG_PRINT("info", ("Dumping routines for database %s", db));
     dump_routines_for_db(db);
   }
-  free_root(&root, MYF(0));
-  my_free(order_by);
-  order_by= 0;
+  free_root(&glob_root, MYF(0));
   if (opt_xml)
   {
     fputs("</database>\n", md_result_file);
@@ -5264,7 +5346,7 @@ static int start_transaction(MYSQL *mysql_con)
 }
 
 
-static ulong find_set(TYPELIB *lib, const char *x, uint length,
+static ulong find_set(TYPELIB *lib, const char *x, size_t length,
                       char **err_pos, uint *err_len)
 {
   const char *end= x + length;
@@ -5322,7 +5404,7 @@ static void print_value(FILE *file, MYSQL_RES  *result, MYSQL_ROW row,
         fputc(' ',file);
         fputs(prefix, file);
         if (string_value)
-          unescape(file,row[0],(uint) strlen(row[0]));
+          unescape(file,row[0], strlen(row[0]));
         else
           fputs(row[0], file);
         check_io(file);
@@ -5576,8 +5658,8 @@ static my_bool get_view_structure(char *table, char* db)
   verbose_msg("-- Retrieving view structure for table %s...\n", table);
 
 #ifdef NOT_REALLY_USED_YET
-  sprintf(insert_pat, "SET SQL_QUOTE_SHOW_CREATE=%d",
-          (opt_quoted || opt_keywords));
+  dynstr_append_checked(&insert_pat, "SET SQL_QUOTE_SHOW_CREATE=");
+  dynstr_append_checked(&insert_pat, (opt_quoted || opt_keywords)? "1":"0");
 #endif
 
   result_table=     quote_name(table, table_buff, 1);
@@ -5617,7 +5699,7 @@ static my_bool get_view_structure(char *table, char* db)
 
   print_comment(sql_file, 0,
                 "\n--\n-- Final view structure for view %s\n--\n\n",
-                result_table);
+                fix_for_comment(result_table));
 
   /* Table might not exist if this view was dumped with --tab. */
   fprintf(sql_file, "/*!50001 DROP TABLE IF EXISTS %s*/;\n", opt_quoted_table);

@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2013, Monty Program Ab.
+   Copyright (c) 2009, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -161,10 +161,11 @@ static int cmp_row_type(Item* item1, Item* item2)
 
 static int agg_cmp_type(Item_result *type, Item **items, uint nitems)
 {
-  uint i;
+  uint unsigned_count= items[0]->unsigned_flag;
   type[0]= items[0]->cmp_type();
-  for (i= 1 ; i < nitems ; i++)
+  for (uint i= 1 ; i < nitems ; i++)
   {
+    unsigned_count+= items[i]->unsigned_flag;
     type[0]= item_cmp_type(type[0], items[i]->cmp_type());
     /*
       When aggregating types of two row expressions we have to check
@@ -176,6 +177,12 @@ static int agg_cmp_type(Item_result *type, Item **items, uint nitems)
     if (type[0] == ROW_RESULT && cmp_row_type(items[0], items[i]))
       return 1;     // error found: invalid usage of rows
   }
+  /**
+    If all arguments are of INT type but have different unsigned_flag values,
+    switch to DECIMAL_RESULT.
+  */
+  if (type[0] == INT_RESULT && unsigned_count != nitems && unsigned_count != 0)
+    type[0]= DECIMAL_RESULT;
   return 0;
 }
 
@@ -791,7 +798,7 @@ int Arg_comparator::set_cmp_func(Item_result_field *owner_arg,
                                         Item **a1, Item **a2,
                                         Item_result type)
 {
-  thd= current_thd;
+  THD *thd= current_thd;
   owner= owner_arg;
   set_null= set_null && owner_arg;
   a= a1;
@@ -861,7 +868,6 @@ Item** Arg_comparator::cache_converted_constant(THD *thd_arg, Item **value,
 void Arg_comparator::set_datetime_cmp_func(Item_result_field *owner_arg,
                                            Item **a1, Item **b1)
 {
-  thd= current_thd;
   owner= owner_arg;
   a= a1;
   b= b1;
@@ -936,12 +942,10 @@ get_datetime_value(THD *thd, Item ***item_arg, Item **cache_arg,
   if (cache_arg && item->const_item() &&
       !(item->type() == Item::CACHE_ITEM && item->cmp_type() == TIME_RESULT))
   {
-    Query_arena backup;
-    Query_arena *save_arena= thd->switch_to_arena_for_cached_items(&backup);
-    Item_cache_temporal *cache= new Item_cache_temporal(f_type);
-    if (save_arena)
-      thd->set_query_arena(save_arena);
+    if (!thd)
+      thd= current_thd;
 
+    Item_cache_temporal *cache= new Item_cache_temporal(f_type);
     cache->store_packed(value, item);
     *cache_arg= cache;
     *item_arg= cache_arg;
@@ -976,12 +980,12 @@ int Arg_comparator::compare_datetime()
     owner->null_value= 1;
 
   /* Get DATE/DATETIME/TIME value of the 'a' item. */
-  a_value= get_datetime_value(thd, &a, &a_cache, *b, &a_is_null);
+  a_value= get_datetime_value(0, &a, &a_cache, *b, &a_is_null);
   if (a_is_null)
     return -1;
 
   /* Get DATE/DATETIME/TIME value of the 'b' item. */
-  b_value= get_datetime_value(thd, &b, &b_cache, *a, &b_is_null);
+  b_value= get_datetime_value(0, &b, &b_cache, *a, &b_is_null);
   if (b_is_null)
     return -1;
 
@@ -999,10 +1003,10 @@ int Arg_comparator::compare_e_datetime()
   longlong a_value, b_value;
 
   /* Get DATE/DATETIME/TIME value of the 'a' item. */
-  a_value= get_datetime_value(thd, &a, &a_cache, *b, &a_is_null);
+  a_value= get_datetime_value(0, &a, &a_cache, *b, &a_is_null);
 
   /* Get DATE/DATETIME/TIME value of the 'b' item. */
-  b_value= get_datetime_value(thd, &b, &b_cache, *a, &b_is_null);
+  b_value= get_datetime_value(0, &b, &b_cache, *a, &b_is_null);
   return a_is_null || b_is_null ? a_is_null == b_is_null
                                 : a_value == b_value;
 }
@@ -1466,9 +1470,36 @@ bool Item_in_optimizer::eval_not_null_tables(uchar *opt_arg)
 bool Item_in_optimizer::fix_left(THD *thd)
 {
   DBUG_ENTER("Item_in_optimizer::fix_left");
-  if ((!args[0]->fixed && args[0]->fix_fields(thd, args)) ||
-      (!cache && !(cache= Item_cache::get_cache(args[0]))))
+  /*
+    Here we will store pointer on place of main storage of left expression.
+    For usual IN (ALL/ANY) it is subquery left_expr.
+    For other cases (MAX/MIN optimization, non-transformed EXISTS (10.0))
+    it is args[0].
+  */
+  Item **ref0= args;
+  if (args[1]->type() == Item::SUBSELECT_ITEM &&
+      ((Item_subselect *)args[1])->is_in_predicate())
+  {
+    /*
+       left_expr->fix_fields() may cause left_expr to be substituted for
+       another item. (e.g. an Item_field may be changed into Item_ref). This
+       transformation is undone at the end of statement execution (e.g. the
+       Item_ref is deleted). However, Item_in_optimizer::args[0] may keep
+       the pointer to the post-transformation item. Because of that, on the
+       next execution we need to copy args[1]->left_expr again.
+    */
+    ref0= &(((Item_in_subselect *)args[1])->left_expr);
+    args[0]= ((Item_in_subselect *)args[1])->left_expr;
+  }
+  if ((!(*ref0)->fixed && (*ref0)->fix_fields(thd, ref0)) ||
+      (!cache && !(cache= Item_cache::get_cache(*ref0))))
     DBUG_RETURN(1);
+  /*
+    During fix_field() expression could be substituted.
+    So we copy changes before use
+  */
+  if (args[0] != (*ref0))
+    args[0]= (*ref0);
   DBUG_PRINT("info", ("actual fix fields"));
 
   cache->setup(args[0]);
@@ -1531,6 +1562,16 @@ bool Item_in_optimizer::fix_left(THD *thd)
 bool Item_in_optimizer::fix_fields(THD *thd, Item **ref)
 {
   DBUG_ASSERT(fixed == 0);
+  Item_subselect *sub= 0;
+  uint col;
+
+  /*
+     MAX/MIN optimization can convert the subquery into
+     expr + Item_singlerow_subselect
+   */
+  if (args[1]->type() == Item::SUBSELECT_ITEM)
+    sub= (Item_subselect *)args[1];
+
   if (fix_left(thd))
     return TRUE;
   if (args[0]->maybe_null)
@@ -1538,12 +1579,11 @@ bool Item_in_optimizer::fix_fields(THD *thd, Item **ref)
 
   if (!args[1]->fixed && args[1]->fix_fields(thd, args+1))
     return TRUE;
-
-  Item_in_subselect * sub= (Item_in_subselect *)args[1];
   if (!invisible_mode() &&
-      args[0]->cols() != sub->engine->cols())
+      ((sub && ((col= args[0]->cols()) != sub->engine->cols())) ||
+       (!sub && (args[1]->cols() != (col= 1)))))
   {
-    my_error(ER_OPERAND_COLUMNS, MYF(0), args[0]->cols());
+    my_error(ER_OPERAND_COLUMNS, MYF(0), col);
     return TRUE;
   }
   if (args[1]->maybe_null)
@@ -2585,10 +2625,7 @@ bool Item_func_ifnull::date_op(MYSQL_TIME *ltime, uint fuzzydate)
   DBUG_ASSERT(fixed == 1);
   if (!args[0]->get_date_with_conversion(ltime, fuzzydate & ~TIME_FUZZY_DATES))
     return (null_value= false);
-  if (!args[1]->get_date_with_conversion(ltime, fuzzydate & ~TIME_FUZZY_DATES))
-    return (null_value= false);
-  bzero((char*) ltime,sizeof(*ltime));
-  return null_value= !(fuzzydate & TIME_FUZZY_DATES);
+  return (null_value= args[1]->get_date_with_conversion(ltime, fuzzydate & ~TIME_FUZZY_DATES));
 }
 
 
@@ -2756,7 +2793,8 @@ Item_func_if::str_op(String *str)
   String *res=arg->val_str(str);
   if (res)
     res->set_charset(collation.collation);
-  null_value=arg->null_value;
+  if ((null_value=arg->null_value))
+    res= NULL;
   return res;
 }
 
@@ -2767,7 +2805,8 @@ Item_func_if::decimal_op(my_decimal *decimal_value)
   DBUG_ASSERT(fixed == 1);
   Item *arg= args[0]->val_bool() ? args[1] : args[2];
   my_decimal *value= arg->val_decimal(decimal_value);
-  null_value= arg->null_value;
+  if ((null_value= arg->null_value))
+    value= NULL;
   return value;
 }
 
@@ -3043,24 +3082,6 @@ bool Item_func_case::fix_fields(THD *thd, Item **ref)
 }
 
 
-void Item_func_case::agg_str_lengths(Item* arg)
-{
-  fix_char_length(MY_MAX(max_char_length(), arg->max_char_length()));
-  set_if_bigger(decimals, arg->decimals);
-  unsigned_flag= unsigned_flag && arg->unsigned_flag;
-}
-
-
-void Item_func_case::agg_num_lengths(Item *arg)
-{
-  uint len= my_decimal_length_to_precision(arg->max_length, arg->decimals,
-                                           arg->unsigned_flag) - arg->decimals;
-  set_if_bigger(max_length, len); 
-  set_if_bigger(decimals, arg->decimals);
-  unsigned_flag= unsigned_flag && arg->unsigned_flag; 
-}
-
-
 /**
   Check if (*place) and new_value points to different Items and call
   THD::change_item_tree() if needed.
@@ -3126,17 +3147,7 @@ void Item_func_case::fix_length_and_dec()
   }
   else
   {
-    collation.set_numeric();
-    max_length=0;
-    decimals=0;
-    unsigned_flag= TRUE;
-    for (uint i= 0; i < ncases; i+= 2)
-      agg_num_lengths(args[i + 1]);
-    if (else_expr_num != -1) 
-      agg_num_lengths(args[else_expr_num]);
-    max_length= my_decimal_precision_to_length_no_truncation(max_length +
-                                                             decimals, decimals,
-                                               unsigned_flag);
+    fix_attributes(agg, nagg);
   }
   
   /*
@@ -3336,16 +3347,12 @@ double Item_func_coalesce::real_op()
 bool Item_func_coalesce::date_op(MYSQL_TIME *ltime,uint fuzzydate)
 {
   DBUG_ASSERT(fixed == 1);
-  null_value= 0;
   for (uint i= 0; i < arg_count; i++)
   {
-    bool res= args[i]->get_date_with_conversion(ltime,
-                                                fuzzydate & ~TIME_FUZZY_DATES);
-    if (!args[i]->null_value)
-      return res;
+    if (!args[i]->get_date_with_conversion(ltime, fuzzydate & ~TIME_FUZZY_DATES))
+      return (null_value= false);
   }
-  bzero((char*) ltime,sizeof(*ltime));
-  return null_value|= !(fuzzydate & TIME_FUZZY_DATES);
+  return (null_value= true);
 }
 
 
@@ -3368,19 +3375,32 @@ void Item_func_coalesce::fix_length_and_dec()
 {
   cached_field_type= agg_field_type(args, arg_count);
   agg_result_type(&cached_result_type, args, arg_count);
+  fix_attributes(args, arg_count);
+}
+
+
+#if MYSQL_VERSION_ID > 100100
+#error Rename this to Item_hybrid_func::fix_attributes() when mering to 10.1
+#endif
+void Item_func_hybrid_result_type::fix_attributes(Item **items, uint nitems)
+{
   switch (cached_result_type) {
   case STRING_RESULT:
-    if (count_string_result_length(cached_field_type, args, arg_count))
+    if (count_string_result_length(field_type(),
+                                   items, nitems))
       return;          
     break;
   case DECIMAL_RESULT:
-    count_decimal_length();
+    collation.set_numeric();
+    count_decimal_length(items, nitems);
     break;
   case REAL_RESULT:
-    count_real_length();
+    collation.set_numeric();
+    count_real_length(items, nitems);
     break;
   case INT_RESULT:
-    count_only_length(args, arg_count);
+    collation.set_numeric();
+    count_only_length(items, nitems);
     decimals= 0;
     break;
   case ROW_RESULT:
@@ -3640,7 +3660,7 @@ void in_datetime::set(uint pos,Item *item)
   bool is_null;
   struct packed_longlong *buff= &((packed_longlong*) base)[pos];
 
-  buff->val= get_datetime_value(thd, &tmp_item, 0, warn_item, &is_null);
+  buff->val= get_datetime_value(0, &tmp_item, 0, warn_item, &is_null);
   buff->unsigned_flag= 1L;
 }
 
@@ -3648,7 +3668,7 @@ uchar *in_datetime::get_value(Item *item)
 {
   bool is_null;
   Item **tmp_item= lval_cache ? &lval_cache : &item;
-  tmp.val= get_datetime_value(thd, &tmp_item, &lval_cache, warn_item, &is_null);
+  tmp.val= get_datetime_value(0, &tmp_item, &lval_cache, warn_item, &is_null);
   if (item->null_value)
     return 0;
   tmp.unsigned_flag= 1L;
@@ -3892,7 +3912,7 @@ void cmp_item_datetime::store_value(Item *item)
 {
   bool is_null;
   Item **tmp_item= lval_cache ? &lval_cache : &item;
-  value= get_datetime_value(thd, &tmp_item, &lval_cache, warn_item, &is_null);
+  value= get_datetime_value(0, &tmp_item, &lval_cache, warn_item, &is_null);
 }
 
 
@@ -3901,7 +3921,7 @@ int cmp_item_datetime::cmp(Item *arg)
   bool is_null;
   Item **tmp_item= &arg;
   return value !=
-    get_datetime_value(thd, &tmp_item, 0, warn_item, &is_null);
+    get_datetime_value(0, &tmp_item, 0, warn_item, &is_null);
 }
 
 

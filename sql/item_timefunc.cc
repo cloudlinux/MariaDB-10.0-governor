@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2012, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2013, Monty Program Ab
+   Copyright (c) 2009, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -426,7 +426,7 @@ static bool extract_date_time(DATE_TIME_FORMAT *format,
     {
       if (!my_isspace(&my_charset_latin1,*val))
       {
-	make_truncated_value_warning(current_thd, Sql_condition::WARN_LEVEL_WARN,
+        make_truncated_value_warning(current_thd, Sql_condition::WARN_LEVEL_WARN,
                                      val_begin, length,
 				     cached_timestamp_type, NullS);
 	break;
@@ -708,7 +708,7 @@ static bool get_interval_info(const char *str,uint length,CHARSET_INFO *cs,
   {
     longlong value;
     const char *start= str;
-    for (value=0; str != end && my_isdigit(cs, *str) ; str++)
+    for (value= 0; str != end && my_isdigit(cs, *str); str++)
       value= value*10 + *str - '0';
     msec_length= 6 - (str - start);
     values[i]= value;
@@ -936,9 +936,8 @@ void Item_func_monthname::fix_length_and_dec()
 {
   THD* thd= current_thd;
   CHARSET_INFO *cs= thd->variables.collation_connection;
-  uint32 repertoire= my_charset_repertoire(cs);
   locale= thd->variables.lc_time_names;  
-  collation.set(cs, DERIVATION_COERCIBLE, repertoire);
+  collation.set(cs, DERIVATION_COERCIBLE, locale->repertoire());
   decimals=0;
   max_length= locale->max_month_name_length * collation.collation->mbmaxlen;
   maybe_null=1; 
@@ -1083,9 +1082,8 @@ void Item_func_dayname::fix_length_and_dec()
 {
   THD* thd= current_thd;
   CHARSET_INFO *cs= thd->variables.collation_connection;
-  uint32 repertoire= my_charset_repertoire(cs);
   locale= thd->variables.lc_time_names;  
-  collation.set(cs, DERIVATION_COERCIBLE, repertoire);
+  collation.set(cs, DERIVATION_COERCIBLE, locale->repertoire());
   decimals=0;
   max_length= locale->max_day_name_length * collation.collation->mbmaxlen;
   maybe_null=1; 
@@ -1462,6 +1460,7 @@ void Item_temporal_func::fix_length_and_dec()
     time can get us to return NULL.
   */ 
   maybe_null= 1;
+
   if (decimals)
   {
     if (decimals == NOT_FIXED_DEC)
@@ -3000,7 +2999,7 @@ void Item_func_timestamp_diff::print(String *str, enum_query_type query_type)
     str->append(STRING_WITH_LEN("SECOND"));
     break;		
   case INTERVAL_MICROSECOND:
-    str->append(STRING_WITH_LEN("SECOND_FRAC"));
+    str->append(STRING_WITH_LEN("MICROSECOND"));
     break;
   default:
     break;

@@ -1,5 +1,5 @@
-/* Copyright (c) 2002, 2012, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2013, Monty Program Ab
+/* Copyright (c) 2002, 2014, Oracle and/or its affiliates.
+   Copyright (c) 2008, 2017, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -2261,7 +2261,7 @@ static void test_ps_query_cache()
     return;
   }
 
-  rc= mysql_query(mysql, "SET SQL_MODE=''");
+  rc= mysql_set_character_set(mysql, "utf8");
   myquery(rc);
 
   /* prepare the table */
@@ -2306,7 +2306,7 @@ static void test_ps_query_cache()
         mysql_close(lmysql);
         DIE_UNLESS(0);
       }
-      rc= mysql_query(lmysql, "SET SQL_MODE=''");
+      rc= mysql_set_character_set(lmysql, "utf8");
       myquery(rc);
 
       if (!opt_silent)
@@ -11725,10 +11725,10 @@ static void test_bug5315()
   rc= mysql_stmt_prepare(stmt, stmt_text, strlen(stmt_text));
   DIE_UNLESS(rc == 0);
   if (!opt_silent)
-    printf("Excuting mysql_change_user\n");
+    printf("Executing mysql_change_user\n");
   mysql_change_user(mysql, opt_user, opt_password, current_db);
   if (!opt_silent)
-    printf("Excuting mysql_stmt_execute\n");
+    printf("Executing mysql_stmt_execute\n");
   rc= mysql_stmt_execute(stmt);
   DIE_UNLESS(rc != 0);
   if (rc)
@@ -11738,10 +11738,10 @@ static void test_bug5315()
   }
   /* check that connection is OK */
   if (!opt_silent)
-    printf("Excuting mysql_stmt_close\n");
+    printf("Executing mysql_stmt_close\n");
   mysql_stmt_close(stmt);
   if (!opt_silent)
-    printf("Excuting mysql_stmt_init\n");
+    printf("Executing mysql_stmt_init\n");
   stmt= mysql_stmt_init(mysql);
   rc= mysql_stmt_prepare(stmt, stmt_text, strlen(stmt_text));
   DIE_UNLESS(rc == 0);
@@ -16647,7 +16647,7 @@ static void test_bug30472()
 
   /* Switch client character set. */
 
-  DIE_IF(mysql_set_character_set(&con, "utf8"));
+  DIE_IF(mysql_set_character_set(&con, "latin2"));
 
   /* Retrieve character set information. */
 
@@ -16663,10 +16663,10 @@ static void test_bug30472()
       2) new character set is different from the original one.
   */
 
-  DIE_UNLESS(strcmp(character_set_name_2, "utf8") == 0);
-  DIE_UNLESS(strcmp(character_set_client_2, "utf8") == 0);
-  DIE_UNLESS(strcmp(character_set_results_2, "utf8") == 0);
-  DIE_UNLESS(strcmp(collation_connnection_2, "utf8_general_ci") == 0);
+  DIE_UNLESS(strcmp(character_set_name_2, "latin2") == 0);
+  DIE_UNLESS(strcmp(character_set_client_2, "latin2") == 0);
+  DIE_UNLESS(strcmp(character_set_results_2, "latin2") == 0);
+  DIE_UNLESS(strcmp(collation_connnection_2, "latin2_general_ci") == 0);
 
   DIE_UNLESS(strcmp(character_set_name_1, character_set_name_2) != 0);
   DIE_UNLESS(strcmp(character_set_client_1, character_set_client_2) != 0);
@@ -18440,6 +18440,7 @@ static void test_bug58036()
   /* Part1: try to connect with ucs2 client character set */
   conn= mysql_client_init(NULL);
   mysql_options(conn, MYSQL_SET_CHARSET_NAME, "ucs2");
+
   if (mysql_real_connect(conn, opt_host, opt_user,
                          opt_password,  opt_db ? opt_db : "test",
                          opt_port, opt_unix_socket, 0))
@@ -18490,7 +18491,6 @@ static void test_bug58036()
     printf("Got mysql_change_user() error (expected): %s (%d)\n",
            mysql_error(conn), mysql_errno(conn));
   mysql_close(conn);
-
   DBUG_VOID_RETURN;
 }
 
@@ -19274,6 +19274,49 @@ static void test_mdev4326()
 }
 
 
+/**
+   BUG#17512527: LIST HANDLING INCORRECT IN MYSQL_PRUNE_STMT_LIST()
+*/
+static void test_bug17512527()
+{
+  MYSQL *conn;
+  MYSQL_STMT *stmt1, *stmt2;
+  unsigned long thread_id;
+  char query[MAX_TEST_QUERY_LENGTH];
+  int rc;
+
+  conn= client_connect(0, MYSQL_PROTOCOL_SOCKET, 1);
+
+  stmt1 = mysql_stmt_init(conn);
+  check_stmt(stmt1);
+  rc= mysql_stmt_prepare(stmt1, STRING_WITH_LEN("SELECT 1"));
+  check_execute(stmt1, rc);
+
+  stmt2 = mysql_stmt_init(conn);
+  check_stmt(stmt2);
+
+  thread_id= mysql_thread_id(conn);
+  sprintf(query, "KILL %lu", thread_id);
+  if (thread_query(query))
+    exit(1);
+
+  rc= mysql_stmt_prepare(stmt2, STRING_WITH_LEN("SELECT 2"));
+  check_execute(stmt2, rc);
+
+  rc= mysql_stmt_execute(stmt1);
+  check_execute_r(stmt1, rc);
+
+  rc= mysql_stmt_execute(stmt2);
+  check_execute(stmt2, rc);
+
+  mysql_close(conn);
+
+  mysql_stmt_close(stmt2);
+  mysql_stmt_close(stmt1);
+}
+
+
+
 /*
   Check compressed protocol
 */
@@ -19346,6 +19389,7 @@ static void test_big_packet()
                            opt_password, current_db, opt_port,
                            opt_unix_socket, 0)))
   {
+    mysql_close(mysql_local);
     fprintf(stderr, "\n connection failed(%s)", mysql_error(mysql_local));
     exit(1);
   }
@@ -19644,6 +19688,9 @@ static struct my_tests_st my_tests[]= {
   { "test_bug13001491", test_bug13001491 },
   { "test_mdev4326", test_mdev4326 },
   { "test_ps_sp_out_params", test_ps_sp_out_params },
+#ifndef _WIN32
+  { "test_bug17512527", test_bug17512527},
+#endif
   { "test_compressed_protocol", test_compressed_protocol },
   { "test_big_packet", test_big_packet },
   { 0, 0 }

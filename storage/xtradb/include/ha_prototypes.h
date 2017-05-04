@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2006, 2014, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2006, 2016, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -28,14 +28,17 @@ Created 5/11/2006 Osku Salerma
 #define HA_INNODB_PROTOTYPES_H
 
 #include "my_dbug.h"
-#include "mysqld_error.h"
 #include "my_compare.h"
 #include "my_sys.h"
 #include "m_string.h"
-#include "debug_sync.h"
 #include "my_base.h"
 
+#ifndef UNIV_INNOCHECKSUM
+#include "mysqld_error.h"
+#include "debug_sync.h"
 #include "trx0types.h"
+#endif
+
 #include "m_ctype.h" /* CHARSET_INFO */
 
 // Forward declarations
@@ -81,6 +84,8 @@ innobase_raw_format(
 	ulint		buf_size);	/*!< in: output buffer size
 					in bytes */
 
+#ifndef UNIV_INNOCHECKSUM
+
 /*****************************************************************//**
 Invalidates the MySQL query cache for the table. */
 UNIV_INTERN
@@ -96,6 +101,8 @@ innobase_invalidate_query_cache(
 					always in LOWER CASE! */
 	ulint		full_name_len);	/*!< in: full name length where
 					also the null chars count */
+
+#endif /* #ifndef UNIV_INNOCHECKSUM */
 
 /*****************************************************************//**
 Convert a table or index name to the MySQL system_charset_info (UTF-8)
@@ -136,7 +143,7 @@ enum durability_properties
 thd_requested_durability(
 /*=====================*/
 	const THD* thd)	/*!< in: thread handle */
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((nonnull, warn_unused_result));
 
 /******************************************************************//**
 Returns true if the transaction this thread is processing has edited
@@ -188,7 +195,7 @@ innobase_mysql_cmp(
 	const unsigned char* b,		/*!< in: data field */
 	unsigned int	b_length)	/*!< in: data field length,
 					not UNIV_SQL_NULL */
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((nonnull, warn_unused_result));
 /**************************************************************//**
 Converts a MySQL type to an InnoDB type. Note that this function returns
 the 'mtype' of InnoDB. InnoDB differentiates between MySQL's old <= 4.1
@@ -204,7 +211,7 @@ get_innobase_type_from_mysql_type(
 					and unsigned integer
 					types are 'unsigned types' */
 	const void*	field)		/*!< in: MySQL Field */
-	__attribute__((nonnull));
+	MY_ATTRIBUTE((nonnull));
 
 /******************************************************************//**
 Get the variable length bounds of the given character set. */
@@ -302,7 +309,7 @@ innobase_get_stmt(
 /*==============*/
 	THD*	thd,		/*!< in: MySQL thread handle */
 	size_t*	length)		/*!< out: length of the SQL statement */
-	__attribute__((nonnull));
+	MY_ATTRIBUTE((nonnull));
 /******************************************************************//**
 This function is used to find the storage length in bytes of the first n
 characters for prefix indexes using a multibyte character set. The function
@@ -328,7 +335,7 @@ enum icp_result
 innobase_index_cond(
 /*================*/
 	void*	file)	/*!< in/out: pointer to ha_innobase */
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((nonnull, warn_unused_result));
 /******************************************************************//**
 Returns true if the thread supports XA,
 global value of innodb_supports_xa if thd is NULL.
@@ -337,6 +344,25 @@ UNIV_INTERN
 ibool
 thd_supports_xa(
 /*============*/
+	THD*	thd);	/*!< in: thread handle, or NULL to query
+			the global innodb_supports_xa */
+
+/** Get status of innodb_tmpdir.
+@param[in]	thd	thread handle, or NULL to query
+			the global innodb_tmpdir.
+@retval NULL if innodb_tmpdir="" */
+UNIV_INTERN
+const char*
+thd_innodb_tmpdir(
+	THD*	thd);
+
+/******************************************************************//**
+Check the status of fake changes mode (innodb_fake_changes)
+@return	true	if fake change mode is enabled. */
+UNIV_INTERN
+ibool
+thd_fake_changes(
+/*=============*/
 	THD*	thd);	/*!< in: thread handle, or NULL to query
 			the global innodb_supports_xa */
 
@@ -462,7 +488,7 @@ innobase_format_name(
 	const char*	name,		/*!< in: index or table name
 					to format */
 	ibool		is_index_name)	/*!< in: index name */
-	__attribute__((nonnull));
+	MY_ATTRIBUTE((nonnull));
 
 /** Corresponds to Sql_condition:enum_warning_level. */
 enum ib_log_level_t {
@@ -492,7 +518,7 @@ ib_errf(
 	ib_uint32_t	code,		/*!< MySQL error code */
 	const char*	format,		/*!< printf format */
 	...)				/*!< Args */
-	__attribute__((format(printf, 4, 5)));
+	MY_ATTRIBUTE((format(printf, 4, 5)));
 
 /******************************************************************//**
 Use this when the args are passed to the format string from
@@ -523,7 +549,7 @@ ib_logf(
 	ib_log_level_t	level,		/*!< in: warning level */
 	const char*	format,		/*!< printf format */
 	...)				/*!< Args */
-	__attribute__((format(printf, 2, 3)));
+	MY_ATTRIBUTE((format(printf, 2, 3)));
 
 /******************************************************************//**
 Returns the NUL terminated value of glob_hostname.
@@ -569,7 +595,7 @@ innobase_next_autoinc(
 	ulonglong	step,		/*!< in: AUTOINC increment step */
 	ulonglong	offset,		/*!< in: AUTOINC offset */
 	ulonglong	max_value)	/*!< in: max value for type */
-	__attribute__((pure, warn_unused_result));
+	MY_ATTRIBUTE((pure, warn_unused_result));
 
 /********************************************************************//**
 Get the upper limit of the MySQL integral and floating-point type.
@@ -579,7 +605,7 @@ ulonglong
 innobase_get_int_col_max_value(
 /*===========================*/
 	const Field*	field)	/*!< in: MySQL field */
-	__attribute__((nonnull, pure, warn_unused_result));
+	MY_ATTRIBUTE((nonnull, pure, warn_unused_result));
 
 /**********************************************************************
 Check if the length of the identifier exceeds the maximum allowed.
@@ -611,5 +637,27 @@ innobase_convert_to_filename_charset(
 	const char*     from,   /* in: identifier to convert */
 	ulint           len);   /* in: length of 'to', in bytes */
 
+/********************************************************************//**
+Helper function to push warnings from InnoDB internals to SQL-layer. */
+UNIV_INTERN
+void
+ib_push_warning(
+	trx_t*		trx,	/*!< in: trx */
+	ulint		error,	/*!< in: error code to push as warning */
+	const char	*format,/*!< in: warning message */
+	...);
 
+/*****************************************************************//**
+Normalizes a table name string. A normalized name consists of the
+database name catenated to '/' and table name. An example:
+test/mytable. On Windows normalization puts both the database name and the
+table name always to lower case if "set_lower_case" is set to TRUE. */
+void
+normalize_table_name_low(
+/*=====================*/
+	char*		norm_name,	/*!< out: normalized name as a
+					null-terminated string */
+	const char*	name,		/*!< in: table name string */
+	ibool		set_lower_case); /*!< in: TRUE if we want to set
+					name to lower case */
 #endif /* HA_INNODB_PROTOTYPES_H */

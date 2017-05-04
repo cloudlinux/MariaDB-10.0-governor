@@ -1,6 +1,7 @@
 /*****************************************************************************
 
-Copyright (c) 2000, 2015, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2000, 2016, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2017, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -63,6 +64,7 @@ Created 9/17/2000 Heikki Tuuri
 #include "row0import.h"
 #include "m_string.h"
 #include "my_sys.h"
+#include "zlib.h"
 #include <algorithm>
 
 /** Provide optional 4.x backwards compatibility for 5.0 and above */
@@ -259,9 +261,8 @@ row_mysql_store_blob_ref(
 	ut_a(col_len - 8 > 2 || len < 256 * 256);
 	ut_a(col_len - 8 > 3 || len < 256 * 256 * 256);
 
-	mach_write_to_n_little_endian(dest, col_len - 8, len);
-
 	memcpy(dest + col_len - 8, &data, sizeof data);
+	mach_write_to_n_little_endian(dest, col_len - 8, len);
 }
 
 /*******************************************************************//**
@@ -277,7 +278,7 @@ row_mysql_read_blob_ref(
 	ulint		col_len)	/*!< in: BLOB reference length
 					(not BLOB length) */
 {
-	byte*	data;
+	byte*	data = NULL;
 
 	*len = mach_read_from_n_little_endian(ref, col_len - 8);
 
@@ -418,8 +419,8 @@ row_mysql_store_col_in_innobase_format(
 				lenlen = 2;
 			}
 
-			ptr = row_mysql_read_true_varchar(&col_len, mysql_data,
-							  lenlen);
+			ptr = row_mysql_read_true_varchar(
+				&col_len, mysql_data, lenlen);
 		} else {
 			/* Remove trailing spaces from old style VARCHAR
 			columns. */
@@ -1324,18 +1325,14 @@ row_insert_for_mysql(
 		mem_analyze_corruption(prebuilt);
 
 		ut_error;
-	} else if (srv_created_new_raw || srv_force_recovery) {
-		fputs("InnoDB: A new raw disk partition was initialized or\n"
-		      "InnoDB: innodb_force_recovery is on: we do not allow\n"
+	} else if (srv_force_recovery) {
+		fputs("InnoDB: innodb_force_recovery is on: we do not allow\n"
 		      "InnoDB: database modifications by the user. Shut down\n"
 		      "InnoDB: mysqld and edit my.cnf so that"
-		      " newraw is replaced\n"
-		      "InnoDB: with raw, and innodb_force_... is removed.\n",
+		      "InnoDB: innodb_force_... is removed.\n",
 		      stderr);
-		if(srv_force_recovery) {
-			return(DB_READ_ONLY);
-		}
-		return(DB_ERROR);
+
+		return(DB_READ_ONLY);
 	}
 
 	trx->op_info = "inserting";
@@ -1368,6 +1365,8 @@ run_again:
 
 	row_ins_step(thr);
 
+	DEBUG_SYNC_C("ib_after_row_insert_step");
+
 	err = trx->error_state;
 
 	if (err != DB_SUCCESS) {
@@ -1393,7 +1392,8 @@ error_exit:
 		return(err);
 	}
 
-	if (dict_table_has_fts_index(table)) {
+	if (dict_table_has_fts_index(table)
+	    && UNIV_LIKELY(!thr_get_trx(thr)->fake_changes)) {
 		doc_id_t        doc_id;
 
 		/* Extract the doc id from the hidden FTS column */
@@ -1425,9 +1425,12 @@ error_exit:
 			}
 
 			/* Difference between Doc IDs are restricted within
-			4 bytes integer. See fts_get_encoded_len() */
+			4 bytes integer. See fts_get_encoded_len(). Consecutive
+			doc_ids difference should not exceed
+			FTS_DOC_ID_MAX_STEP value. */
 
-			if (doc_id - next_doc_id >= FTS_DOC_ID_MAX_STEP) {
+			if (next_doc_id > 1
+			    && doc_id - next_doc_id >= FTS_DOC_ID_MAX_STEP) {
 				fprintf(stderr,
 					"InnoDB: Doc ID " UINT64PF " is too"
 					" big. Its difference with largest"
@@ -1697,7 +1700,8 @@ row_update_for_mysql(
 	trx_t*		trx		= prebuilt->trx;
 	ulint		fk_depth	= 0;
 
-	ut_ad(prebuilt && trx);
+	ut_ad(prebuilt != NULL);
+	ut_ad(trx != NULL);
 	UT_NOT_USED(mysql_rec);
 
 	if (prebuilt->table->ibd_file_missing) {
@@ -1730,18 +1734,14 @@ row_update_for_mysql(
 		ut_error;
 	}
 
-	if (UNIV_UNLIKELY(srv_created_new_raw || srv_force_recovery)) {
-		fputs("InnoDB: A new raw disk partition was initialized or\n"
-		      "InnoDB: innodb_force_recovery is on: we do not allow\n"
+	if (UNIV_UNLIKELY(srv_force_recovery)) {
+		fputs("InnoDB: innodb_force_recovery is on: we do not allow\n"
 		      "InnoDB: database modifications by the user. Shut down\n"
-		      "InnoDB: mysqld and edit my.cnf so that newraw"
-		      " is replaced\n"
-		      "InnoDB: with raw, and innodb_force_... is removed.\n",
+		      "InnoDB: mysqld and edit my.cnf so that"
+		      "InnoDB: innodb_force_... is removed.\n",
 		      stderr);
-		if(srv_force_recovery) {
-			return(DB_READ_ONLY);
-		}
-		return(DB_ERROR);
+
+		return(DB_READ_ONLY);
 	}
 
 	DEBUG_SYNC_C("innodb_row_update_for_mysql_begin");
@@ -1877,6 +1877,12 @@ run_again:
 	columns would not affect statistics. */
 	if (node->is_delete || !(node->cmpl_info & UPD_NODE_NO_ORD_CHANGE)) {
 		row_update_statistics_if_needed(prebuilt->table);
+	} else {
+		/* Update the table modification counter even when
+		non-indexed columns change if statistics is initialized. */
+		if (prebuilt->table->stat_initialized) {
+			prebuilt->table->stat_modified_counter++;
+		}
 	}
 
 	trx->op_info = "";
@@ -1910,7 +1916,8 @@ row_unlock_for_mysql(
 	btr_pcur_t*	clust_pcur	= &prebuilt->clust_pcur;
 	trx_t*		trx		= prebuilt->trx;
 
-	ut_ad(prebuilt && trx);
+	ut_ad(prebuilt != NULL);
+	ut_ad(trx != NULL);
 
 	if (UNIV_UNLIKELY
 	    (!srv_locks_unsafe_for_binlog
@@ -2250,22 +2257,6 @@ row_create_table_for_mysql(
 		goto err_exit;
 	);
 
-	if (srv_created_new_raw) {
-		fputs("InnoDB: A new raw disk partition was initialized:\n"
-		      "InnoDB: we do not allow database modifications"
-		      " by the user.\n"
-		      "InnoDB: Shut down mysqld and edit my.cnf so that newraw"
-		      " is replaced with raw.\n", stderr);
-err_exit:
-		dict_mem_table_free(table);
-
-		if (commit) {
-			trx_commit_for_mysql(trx);
-		}
-
-		return(DB_ERROR);
-	}
-
 	trx->op_info = "creating table";
 
 	if (row_mysql_is_system_table(table->name)) {
@@ -2276,7 +2267,19 @@ err_exit:
 			"InnoDB: MySQL system tables must be"
 			" of the MyISAM type!\n",
 			table->name);
-		goto err_exit;
+
+#ifndef DBUG_OFF
+err_exit:
+#endif /* !DBUG_OFF */
+		dict_mem_table_free(table);
+
+		if (commit) {
+			trx_commit_for_mysql(trx);
+		}
+
+		trx->op_info = "";
+
+		return(DB_ERROR);
 	}
 
 	trx_start_if_not_started_xa(trx);
@@ -2405,7 +2408,7 @@ err_exit:
 
 			dict_table_close(table, TRUE, FALSE);
 
-			row_drop_table_for_mysql(table->name, trx, FALSE);
+			row_drop_table_for_mysql(table->name, trx, FALSE, TRUE);
 
 			if (commit) {
 				trx_commit_for_mysql(trx);
@@ -2565,7 +2568,7 @@ error_handling:
 
 		trx_rollback_to_savepoint(trx, NULL);
 
-		row_drop_table_for_mysql(table_name, trx, FALSE);
+		row_drop_table_for_mysql(table_name, trx, FALSE, TRUE);
 
 		trx_commit_for_mysql(trx);
 
@@ -2642,7 +2645,7 @@ row_table_add_foreign_constraints(
 
 		trx_rollback_to_savepoint(trx, NULL);
 
-		row_drop_table_for_mysql(name, trx, FALSE);
+		row_drop_table_for_mysql(name, trx, FALSE, TRUE);
 
 		trx_commit_for_mysql(trx);
 
@@ -2683,7 +2686,7 @@ row_drop_table_for_mysql_in_background(
 
 	/* Try to drop the table in InnoDB */
 
-	error = row_drop_table_for_mysql(name, trx, FALSE);
+	error = row_drop_table_for_mysql(name, trx, FALSE, FALSE);
 
 	/* Flush the log to reduce probability that the .frm files and
 	the InnoDB data dictionary get out-of-sync if the user runs
@@ -2729,12 +2732,26 @@ loop:
 		return(n_tables + n_tables_dropped);
 	}
 
+	DBUG_EXECUTE_IF("row_drop_tables_in_background_sleep",
+		os_thread_sleep(5000000);
+	);
+
 	table = dict_table_open_on_name(drop->table_name, FALSE, FALSE,
 					DICT_ERR_IGNORE_NONE);
 
 	if (table == NULL) {
 		/* If for some reason the table has already been dropped
 		through some other mechanism, do not try to drop it */
+
+		goto already_dropped;
+	}
+
+	if (!table->to_be_dropped) {
+		/* There is a scenario: the old table is dropped
+		just after it's added into drop list, and new
+		table with the same name is created, then we try
+		to drop the new table in background. */
+		dict_table_close(table, FALSE, FALSE);
 
 		goto already_dropped;
 	}
@@ -2868,6 +2885,12 @@ row_mysql_table_id_reassign(
 
 	pars_info_add_ull_literal(info, "old_id", table->id);
 	pars_info_add_ull_literal(info, "new_id", *new_id);
+
+	/* As micro-SQL does not support int4 == int8 comparisons,
+	old and new IDs are added again under different names as
+	int4 values*/
+	pars_info_add_int4_literal(info, "old_id_narrow", table->id);
+	pars_info_add_int4_literal(info, "new_id_narrow", *new_id);
 
 	err = que_eval_sql(
 		info,
@@ -3326,16 +3349,6 @@ row_truncate_table_for_mysql(
 
 	ut_ad(table);
 
-	if (srv_created_new_raw) {
-		fputs("InnoDB: A new raw disk partition was initialized:\n"
-		      "InnoDB: we do not allow database modifications"
-		      " by the user.\n"
-		      "InnoDB: Shut down mysqld and edit my.cnf so that newraw"
-		      " is replaced with raw.\n", stderr);
-
-		return(DB_ERROR);
-	}
-
 	if (dict_table_is_discarded(table)) {
 		return(DB_TABLESPACE_DELETED);
 	} else if (table->ibd_file_missing) {
@@ -3655,6 +3668,12 @@ next_rec:
 	pars_info_add_ull_literal(info, "old_id", table->id);
 	pars_info_add_ull_literal(info, "new_id", new_id);
 
+	/* As micro-SQL does not support int4 == int8 comparisons,
+	old and new IDs are added again under different names as
+	int4 values*/
+	pars_info_add_int4_literal(info, "old_id_narrow", table->id);
+	pars_info_add_int4_literal(info, "new_id_narrow", new_id);
+
 	err = que_eval_sql(info,
 			   "PROCEDURE RENUMBER_TABLE_ID_PROC () IS\n"
 			   "BEGIN\n"
@@ -3791,6 +3810,9 @@ row_drop_table_for_mysql(
 	const char*	name,	/*!< in: table name */
 	trx_t*		trx,	/*!< in: transaction handle */
 	bool		drop_db,/*!< in: true=dropping whole database */
+	ibool		create_failed,/*!<in: TRUE=create table failed
+				       because e.g. foreign key column
+				       type mismatch. */
 	bool		nonatomic)
 				/*!< in: whether it is permitted
 				to release and reacquire dict_operation_lock */
@@ -3814,16 +3836,6 @@ row_drop_table_for_mysql(
 	DBUG_PRINT("row_drop_table_for_mysql", ("table: %s", name));
 
 	ut_a(name != NULL);
-
-	if (srv_created_new_raw) {
-		fputs("InnoDB: A new raw disk partition was initialized:\n"
-		      "InnoDB: we do not allow database modifications"
-		      " by the user.\n"
-		      "InnoDB: Shut down mysqld and edit my.cnf so that newraw"
-		      " is replaced with raw.\n", stderr);
-
-		DBUG_RETURN(DB_ERROR);
-	}
 
 	/* The table name is prefixed with the database name and a '/'.
 	Certain table names starting with 'innodb_' have their special
@@ -3991,7 +4003,12 @@ row_drop_table_for_mysql(
 					name,
 					foreign->foreign_table_name_lookup);
 
-			if (foreign->foreign_table != table && !ref_ok) {
+			/* We should allow dropping a referenced table if creating
+			that referenced table has failed for some reason. For example
+			if referenced table is created but it column types that are
+			referenced do not match. */
+			if (foreign->foreign_table != table &&
+			    !create_failed && !ref_ok) {
 
 				FILE*	ef	= dict_foreign_err_file;
 
@@ -4017,6 +4034,13 @@ row_drop_table_for_mysql(
 			}
 		}
 	}
+
+
+	DBUG_EXECUTE_IF("row_drop_table_add_to_background",
+		row_add_table_to_background_drop_list(table->name);
+		err = DB_SUCCESS;
+		goto funct_exit;
+	);
 
 	/* TODO: could we replace the counter n_foreign_key_checks_running
 	with lock checks on the table? Acquire here an exclusive lock on the
@@ -4532,7 +4556,7 @@ row_mysql_drop_temp_tables(void)
 		table = dict_table_get_low(table_name);
 
 		if (table) {
-			row_drop_table_for_mysql(table_name, trx, FALSE);
+			row_drop_table_for_mysql(table_name, trx, FALSE, FALSE);
 			trx_commit_for_mysql(trx);
 		}
 
@@ -4552,7 +4576,7 @@ row_mysql_drop_temp_tables(void)
 Drop all foreign keys in a database, see Bug#18942.
 Called at the end of row_drop_database_for_mysql().
 @return	error code or DB_SUCCESS */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 dberr_t
 drop_all_foreign_keys_in_db(
 /*========================*/
@@ -4635,6 +4659,19 @@ loop:
 	row_mysql_lock_data_dictionary(trx);
 
 	while ((table_name = dict_get_first_table_name_in_db(name))) {
+		/* Drop parent table if it is a fts aux table, to
+		avoid accessing dropped fts aux tables in information
+		scheam when parent table still exists.
+		Note: Drop parent table will drop fts aux tables. */
+		char*	parent_table_name;
+		parent_table_name = fts_get_parent_table_name(
+				table_name, strlen(table_name));
+
+		if (parent_table_name != NULL) {
+			mem_free(table_name);
+			table_name = parent_table_name;
+		}
+
 		ut_a(memcmp(table_name, name, namelen) == 0);
 
 		table = dict_table_open_on_name(
@@ -4701,7 +4738,7 @@ loop:
 			goto loop;
 		}
 
-		err = row_drop_table_for_mysql(table_name, trx, TRUE);
+		err = row_drop_table_for_mysql(table_name, trx, TRUE, FALSE);
 		trx_commit_for_mysql(trx);
 
 		if (err != DB_SUCCESS) {
@@ -4744,7 +4781,7 @@ loop:
 Checks if a table name contains the string "/#sql" which denotes temporary
 tables in MySQL.
 @return	true if temporary table */
-UNIV_INTERN __attribute__((warn_unused_result))
+UNIV_INTERN MY_ATTRIBUTE((warn_unused_result))
 bool
 row_is_mysql_tmp_table_name(
 /*========================*/
@@ -4758,7 +4795,7 @@ row_is_mysql_tmp_table_name(
 /****************************************************************//**
 Delete a single constraint.
 @return	error code or DB_SUCCESS */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 dberr_t
 row_delete_constraint_low(
 /*======================*/
@@ -4781,7 +4818,7 @@ row_delete_constraint_low(
 /****************************************************************//**
 Delete a single constraint.
 @return	error code or DB_SUCCESS */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 dberr_t
 row_delete_constraint(
 /*==================*/
@@ -4833,24 +4870,22 @@ row_rename_table_for_mysql(
 	pars_info_t*	info			= NULL;
 	int		retry;
 	bool		aux_fts_rename		= false;
+	char*		is_part 		= NULL;
 
 	ut_a(old_name != NULL);
 	ut_a(new_name != NULL);
 	ut_ad(trx->state == TRX_STATE_ACTIVE);
 
-	if (srv_created_new_raw || srv_force_recovery) {
-		fputs("InnoDB: A new raw disk partition was initialized or\n"
-		      "InnoDB: innodb_force_recovery is on: we do not allow\n"
+	if (srv_force_recovery) {
+		fputs("InnoDB: innodb_force_recovery is on: we do not allow\n"
 		      "InnoDB: database modifications by the user. Shut down\n"
-		      "InnoDB: mysqld and edit my.cnf so that newraw"
-		      " is replaced\n"
-		      "InnoDB: with raw, and innodb_force_... is removed.\n",
+		      "InnoDB: mysqld and edit my.cnf so that"
+		      "InnoDB: innodb_force_... is removed.\n",
 		      stderr);
-		if(srv_force_recovery) {
-			err = DB_READ_ONLY;
-		}
 
+		err = DB_READ_ONLY;
 		goto funct_exit;
+
 	} else if (row_mysql_is_system_table(new_name)) {
 
 		fprintf(stderr,
@@ -4872,6 +4907,55 @@ row_rename_table_for_mysql(
 
 	table = dict_table_open_on_name(old_name, dict_locked, FALSE,
 					DICT_ERR_IGNORE_NONE);
+
+	/* We look for pattern #P# to see if the table is partitioned
+	MySQL table. */
+#ifdef __WIN__
+	is_part = strstr((char *)old_name, (char *)"#p#");
+#else
+	is_part = strstr((char *)old_name, (char *)"#P#");
+#endif /* __WIN__ */
+
+	/* MySQL partition engine hard codes the file name
+	separator as "#P#". The text case is fixed even if
+	lower_case_table_names is set to 1 or 2. This is true
+	for sub-partition names as well. InnoDB always
+	normalises file names to lower case on Windows, this
+	can potentially cause problems when copying/moving
+	tables between platforms.
+
+	1) If boot against an installation from Windows
+	platform, then its partition table name could
+	be all be in lower case in system tables. So we
+	will need to check lower case name when load table.
+
+	2) If  we boot an installation from other case
+	sensitive platform in Windows, we might need to
+	check the existence of table name without lowering
+	case them in the system table. */
+	if (!table &&
+	    is_part &&
+	    innobase_get_lower_case_table_names() == 1) {
+		char par_case_name[MAX_FULL_NAME_LEN + 1];
+#ifndef __WIN__
+		/* Check for the table using lower
+		case name, including the partition
+		separator "P" */
+		memcpy(par_case_name, old_name,
+			strlen(old_name));
+		par_case_name[strlen(old_name)] = 0;
+		innobase_casedn_str(par_case_name);
+#else
+		/* On Windows platfrom, check
+		whether there exists table name in
+		system table whose name is
+		not being normalized to lower case */
+		normalize_table_name_low(
+			par_case_name, old_name, FALSE);
+#endif
+		table = dict_table_open_on_name(par_case_name, dict_locked, FALSE,
+					DICT_ERR_IGNORE_NONE);
+	}
 
 	if (!table) {
 		err = DB_TABLE_NOT_FOUND;

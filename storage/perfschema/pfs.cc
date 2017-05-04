@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2015, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2016, Oracle and/or its affiliates. All rights reserved.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -2560,10 +2560,7 @@ start_table_io_wait_v1(PSI_table_locker_state *state,
   if (! pfs_table->m_io_enabled)
     return NULL;
 
-  PFS_thread *pfs_thread= pfs_table->m_thread_owner;
-
-  DBUG_ASSERT(pfs_thread ==
-              my_pthread_getspecific_ptr(PFS_thread*, THR_PFS));
+  PFS_thread *pfs_thread= my_pthread_getspecific_ptr(PFS_thread*, THR_PFS);
 
   register uint flags;
   ulonglong timer_start= 0;
@@ -2666,7 +2663,7 @@ start_table_lock_wait_v1(PSI_table_locker_state *state,
   if (! pfs_table->m_lock_enabled)
     return NULL;
 
-  PFS_thread *pfs_thread= pfs_table->m_thread_owner;
+  PFS_thread *pfs_thread= my_pthread_getspecific_ptr(PFS_thread*, THR_PFS);
 
   PFS_TL_LOCK_TYPE lock_type;
 
@@ -3068,7 +3065,12 @@ start_socket_wait_v1(PSI_socket_locker_state *state,
 
   if (flag_thread_instrumentation)
   {
-    PFS_thread *pfs_thread= pfs_socket->m_thread_owner;
+    /*
+       Do not use pfs_socket->m_thread_owner here,
+       as different threads may use concurrently the same socket,
+       for example during a KILL.
+    */
+    PFS_thread *pfs_thread= my_pthread_getspecific_ptr(PFS_thread*, THR_PFS);
 
     if (unlikely(pfs_thread == NULL))
       return NULL;
@@ -3436,6 +3438,8 @@ static void end_idle_wait_v1(PSI_idle_locker* locker)
       if (flag_events_waits_history_long)
         insert_events_waits_history_long(wait);
       thread->m_events_waits_current--;
+
+      DBUG_ASSERT(wait == thread->m_events_waits_current);
     }
   }
 
@@ -3517,6 +3521,8 @@ static void end_mutex_wait_v1(PSI_mutex_locker* locker, int rc)
       if (flag_events_waits_history_long)
         insert_events_waits_history_long(wait);
       thread->m_events_waits_current--;
+
+      DBUG_ASSERT(wait == thread->m_events_waits_current);
     }
   }
 }
@@ -3596,6 +3602,8 @@ static void end_rwlock_rdwait_v1(PSI_rwlock_locker* locker, int rc)
       if (flag_events_waits_history_long)
         insert_events_waits_history_long(wait);
       thread->m_events_waits_current--;
+
+      DBUG_ASSERT(wait == thread->m_events_waits_current);
     }
   }
 }
@@ -3668,6 +3676,8 @@ static void end_rwlock_wrwait_v1(PSI_rwlock_locker* locker, int rc)
       if (flag_events_waits_history_long)
         insert_events_waits_history_long(wait);
       thread->m_events_waits_current--;
+
+      DBUG_ASSERT(wait == thread->m_events_waits_current);
     }
   }
 }
@@ -3732,6 +3742,8 @@ static void end_cond_wait_v1(PSI_cond_locker* locker, int rc)
       if (flag_events_waits_history_long)
         insert_events_waits_history_long(wait);
       thread->m_events_waits_current--;
+
+      DBUG_ASSERT(wait == thread->m_events_waits_current);
     }
   }
 }
@@ -3826,6 +3838,8 @@ static void end_table_io_wait_v1(PSI_table_locker* locker)
       if (flag_events_waits_history_long)
         insert_events_waits_history_long(wait);
       thread->m_events_waits_current--;
+
+      DBUG_ASSERT(wait == thread->m_events_waits_current);
     }
   }
 
@@ -3895,6 +3909,8 @@ static void end_table_lock_wait_v1(PSI_table_locker* locker)
       if (flag_events_waits_history_long)
         insert_events_waits_history_long(wait);
       thread->m_events_waits_current--;
+
+      DBUG_ASSERT(wait == thread->m_events_waits_current);
     }
   }
 
@@ -4143,6 +4159,8 @@ static void end_file_wait_v1(PSI_file_locker *locker,
       if (flag_events_waits_history_long)
         insert_events_waits_history_long(wait);
       thread->m_events_waits_current--;
+
+      DBUG_ASSERT(wait == thread->m_events_waits_current);
     }
   }
 }
@@ -4388,6 +4406,8 @@ get_thread_statement_locker_v1(PSI_statement_locker_state *state,
                                const void *charset)
 {
   DBUG_ASSERT(state != NULL);
+  DBUG_ASSERT(charset != NULL);
+
   if (! flag_global_instrumentation)
     return NULL;
   PFS_statement_class *klass= find_statement_class(key);
@@ -4432,6 +4452,8 @@ get_thread_statement_locker_v1(PSI_statement_locker_state *state,
       pfs->m_lock_time= 0;
       pfs->m_current_schema_name_length= 0;
       pfs->m_sqltext_length= 0;
+      pfs->m_sqltext_truncated= false;
+      pfs->m_sqltext_cs_number= system_charset_info->number; /* default */
 
       pfs->m_message_text[0]= '\0';
       pfs->m_sql_errno= 0;
@@ -4511,6 +4533,7 @@ get_thread_statement_locker_v1(PSI_statement_locker_state *state,
   state->m_digest= NULL;
 
   state->m_schema_name_length= 0;
+  state->m_cs_number= ((CHARSET_INFO *)charset)->number;
 
   return reinterpret_cast<PSI_statement_locker*> (state);
 }
@@ -4616,10 +4639,14 @@ static void set_statement_text_v1(PSI_statement_locker *locker,
     PFS_events_statements *pfs= reinterpret_cast<PFS_events_statements*> (state->m_statement);
     DBUG_ASSERT(pfs != NULL);
     if (text_len > sizeof (pfs->m_sqltext))
+    {
       text_len= sizeof(pfs->m_sqltext);
+      pfs->m_sqltext_truncated= true;
+    }
     if (text_len)
       memcpy(pfs->m_sqltext, text, text_len);
     pfs->m_sqltext_length= text_len;
+    pfs->m_sqltext_cs_number= state->m_cs_number;
   }
 
   return;
@@ -4832,6 +4859,7 @@ static void end_statement_v1(PSI_statement_locker *locker, void *stmt_da)
           memcpy(pfs->m_message_text, da->message(), MYSQL_ERRMSG_SIZE);
           pfs->m_message_text[MYSQL_ERRMSG_SIZE]= 0;
           pfs->m_sql_errno= da->sql_errno();
+          pfs->m_error_count++;
           memcpy(pfs->m_sqlstate, da->get_sqlstate(), SQLSTATE_LENGTH);
           break;
         case Diagnostics_area::DA_DISABLED:
@@ -5060,6 +5088,8 @@ static void end_socket_wait_v1(PSI_socket_locker *locker, size_t byte_count)
     if (flag_events_waits_history_long)
       insert_events_waits_history_long(wait);
     thread->m_events_waits_current--;
+
+    DBUG_ASSERT(wait == thread->m_events_waits_current);
   }
 }
 

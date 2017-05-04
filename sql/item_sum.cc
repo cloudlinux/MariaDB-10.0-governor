@@ -1479,7 +1479,7 @@ my_decimal *Item_sum_sum::val_decimal(my_decimal *val)
   if (aggr)
     aggr->endup();
   if (hybrid_type == DECIMAL_RESULT)
-    return (dec_buffs + curr_dec_buff);
+    return null_value ? NULL : (dec_buffs + curr_dec_buff);
   return val_decimal_from_real(val);
 }
 
@@ -1779,6 +1779,8 @@ double Item_sum_std::val_real()
 {
   DBUG_ASSERT(fixed == 1);
   double nr= Item_sum_variance::val_real();
+  if (my_isinf(nr))
+    return DBL_MAX;
   DBUG_ASSERT(nr >= 0.0);
   return sqrt(nr);
 }
@@ -3527,9 +3529,17 @@ bool Item_func_group_concat::setup(THD *thd)
     "all_fields". The resulting field list is used as input to create
     tmp table columns.
   */
-  if (arg_count_order &&
-      setup_order(thd, args, context->table_list, list, all_fields, *order))
-    DBUG_RETURN(TRUE);
+  if (arg_count_order)
+  {
+    uint n_elems= arg_count_order + all_fields.elements;
+    ref_pointer_array= static_cast<Item**>(thd->alloc(sizeof(Item*) * n_elems));
+    if (!ref_pointer_array)
+      DBUG_RETURN(TRUE);
+    memcpy(ref_pointer_array, args, arg_count * sizeof(Item*));
+    if (setup_order(thd, ref_pointer_array, context->table_list, list,
+                    all_fields, *order))
+      DBUG_RETURN(TRUE);
+  }
 
   count_field_types(select_lex, tmp_table_param, all_fields, 0);
   tmp_table_param->force_copy_fields= force_copy_fields;

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2011, 2015, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2011, 2016, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -194,13 +194,30 @@ struct row_log_t {
 				or by index->lock X-latch only */
 	row_log_buf_t	head;	/*!< reader context; protected by MDL only;
 				modifiable by row_log_apply_ops() */
+	const char*	path;	/*!< where to create temporary file during
+				log operation */
 };
 
+/** Create the file or online log if it does not exist.
+@param[in,out]	log	online rebuild log
+@return file descriptor. */
+static MY_ATTRIBUTE((warn_unused_result))
+int
+row_log_tmpfile(
+	row_log_t*	log)
+{
+	DBUG_ENTER("row_log_tmpfile");
+	if (log->fd < 0) {
+		log->fd = row_merge_file_create_low(log->path);
+	}
+
+	DBUG_RETURN(log->fd);
+}
 
 /** Allocate the memory for the log buffer.
 @param[in,out]	log_buf	Buffer used for log operation
 @return TRUE if success, false if not */
-static __attribute__((warn_unused_result))
+static MY_ATTRIBUTE((warn_unused_result))
 bool
 row_log_block_allocate(
 	row_log_buf_t&	log_buf)
@@ -340,6 +357,12 @@ row_log_online_op(
 			       log->tail.buf, avail_size);
 		}
 		UNIV_MEM_ASSERT_RW(log->tail.block, srv_sort_buf_size);
+
+		if (row_log_tmpfile(log) < 0) {
+			log->error = DB_OUT_OF_MEMORY;
+			goto err_exit;
+		}
+
 		ret = os_file_write(
 			"(modification log)",
 			OS_FILE_FROM_FD(log->fd),
@@ -384,7 +407,7 @@ row_log_table_get_error(
 /******************************************************//**
 Starts logging an operation to a table that is being rebuilt.
 @return pointer to log, or NULL if no logging is necessary */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 byte*
 row_log_table_open(
 /*===============*/
@@ -419,7 +442,7 @@ err_exit:
 
 /******************************************************//**
 Stops logging an operation to a table that is being rebuilt. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 row_log_table_close_func(
 /*=====================*/
@@ -450,6 +473,12 @@ row_log_table_close_func(
 			       log->tail.buf, avail);
 		}
 		UNIV_MEM_ASSERT_RW(log->tail.block, srv_sort_buf_size);
+
+		if (row_log_tmpfile(log) < 0) {
+			log->error = DB_OUT_OF_MEMORY;
+			goto err_exit;
+		}
+
 		ret = os_file_write(
 			"(modification log)",
 			OS_FILE_FROM_FD(log->fd),
@@ -469,6 +498,7 @@ write_failed:
 
 	log->tail.total += size;
 	UNIV_MEM_INVALID(log->tail.buf, sizeof log->tail.buf);
+err_exit:
 	mutex_exit(&log->mutex);
 }
 
@@ -583,7 +613,7 @@ row_log_table_delete(
 		&old_pk_extra_size);
 	ut_ad(old_pk_extra_size < 0x100);
 
-	mrec_size = 4 + old_pk_size;
+	mrec_size = 6 + old_pk_size;
 
 	/* Log enough prefix of the BLOB unless both the
 	old and new table are in COMPACT or REDUNDANT format,
@@ -613,8 +643,8 @@ row_log_table_delete(
 		*b++ = static_cast<byte>(old_pk_extra_size);
 
 		/* Log the size of external prefix we saved */
-		mach_write_to_2(b, ext_size);
-		b += 2;
+		mach_write_to_4(b, ext_size);
+		b += 4;
 
 		rec_convert_dtuple_to_temp(
 			b + old_pk_extra_size, new_index,
@@ -782,7 +812,7 @@ row_log_table_low_redundant(
 
 /******************************************************//**
 Logs an insert or update to a table that is being rebuilt. */
-static __attribute__((nonnull(1,2,3)))
+static MY_ATTRIBUTE((nonnull(1,2,3)))
 void
 row_log_table_low(
 /*==============*/
@@ -1282,7 +1312,7 @@ row_log_table_blob_alloc(
 /******************************************************//**
 Converts a log record to a table row.
 @return converted row, or NULL if the conversion fails */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 const dtuple_t*
 row_log_table_apply_convert_mrec(
 /*=============================*/
@@ -1436,7 +1466,7 @@ blob_done:
 /******************************************************//**
 Replays an insert operation on a table that was rebuilt.
 @return DB_SUCCESS or error code */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 dberr_t
 row_log_table_apply_insert_low(
 /*===========================*/
@@ -1454,6 +1484,7 @@ row_log_table_apply_insert_low(
 	dtuple_t*	entry;
 	const row_log_t*log	= dup->index->online_log;
 	dict_index_t*	index	= dict_table_get_first_index(log->table);
+	ulint		n_index = 0;
 
 	ut_ad(dtuple_validate(row));
 	ut_ad(trx_id);
@@ -1489,6 +1520,8 @@ row_log_table_apply_insert_low(
 	}
 
 	do {
+		n_index++;
+
 		if (!(index = dict_table_get_next_index(index))) {
 			break;
 		}
@@ -1501,6 +1534,12 @@ row_log_table_apply_insert_low(
 		error = row_ins_sec_index_entry_low(
 			flags, BTR_MODIFY_TREE,
 			index, offsets_heap, heap, entry, trx_id, thr);
+
+		/* Report correct index name for duplicate key error. */
+		if (error == DB_DUPLICATE_KEY) {
+			thr_get_trx(thr)->error_key_num = n_index;
+		}
+
 	} while (error == DB_SUCCESS);
 
 	return(error);
@@ -1509,7 +1548,7 @@ row_log_table_apply_insert_low(
 /******************************************************//**
 Replays an insert operation on a table that was rebuilt.
 @return DB_SUCCESS or error code */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 dberr_t
 row_log_table_apply_insert(
 /*=======================*/
@@ -1561,7 +1600,7 @@ row_log_table_apply_insert(
 /******************************************************//**
 Deletes a record from a table that is being rebuilt.
 @return DB_SUCCESS or error code */
-static __attribute__((nonnull(1, 2, 4, 5), warn_unused_result))
+static MY_ATTRIBUTE((nonnull(1, 2, 4, 5), warn_unused_result))
 dberr_t
 row_log_table_apply_delete_low(
 /*===========================*/
@@ -1659,7 +1698,7 @@ flag_ok:
 /******************************************************//**
 Replays a delete operation on a table that was rebuilt.
 @return DB_SUCCESS or error code */
-static __attribute__((nonnull(1, 3, 4, 5, 6, 7), warn_unused_result))
+static MY_ATTRIBUTE((nonnull(1, 3, 4, 5, 6, 7), warn_unused_result))
 dberr_t
 row_log_table_apply_delete(
 /*=======================*/
@@ -1781,7 +1820,7 @@ all_done:
 /******************************************************//**
 Replays an update operation on a table that was rebuilt.
 @return DB_SUCCESS or error code */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 dberr_t
 row_log_table_apply_update(
 /*=======================*/
@@ -1808,6 +1847,7 @@ row_log_table_apply_update(
 	mtr_t		mtr;
 	btr_pcur_t	pcur;
 	dberr_t		error;
+	ulint		n_index = 0;
 
 	ut_ad(dtuple_get_n_fields_cmp(old_pk)
 	      == dict_index_get_n_unique(index));
@@ -2083,6 +2123,8 @@ func_exit_committed:
 			break;
 		}
 
+		n_index++;
+
 		if (index->type & DICT_FTS) {
 			continue;
 		}
@@ -2126,6 +2168,11 @@ func_exit_committed:
 			BTR_MODIFY_TREE, index, offsets_heap, heap,
 			entry, trx_id, thr);
 
+		/* Report correct index name for duplicate key error. */
+		if (error == DB_DUPLICATE_KEY) {
+			thr_get_trx(thr)->error_key_num = n_index;
+		}
+
 		mtr_start(&mtr);
 	}
 
@@ -2136,7 +2183,7 @@ func_exit_committed:
 Applies an operation to a table that was rebuilt.
 @return NULL on failure (mrec corruption) or when out of data;
 pointer to next record on success */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 const mrec_t*
 row_log_table_apply_op(
 /*===================*/
@@ -2221,14 +2268,14 @@ row_log_table_apply_op(
 		break;
 
 	case ROW_T_DELETE:
-		/* 1 (extra_size) + 2 (ext_size) + at least 1 (payload) */
-		if (mrec + 4 >= mrec_end) {
+		/* 1 (extra_size) + 4 (ext_size) + at least 1 (payload) */
+		if (mrec + 6 >= mrec_end) {
 			return(NULL);
 		}
 
 		extra_size = *mrec++;
-		ext_size = mach_read_from_2(mrec);
-		mrec += 2;
+		ext_size = mach_read_from_4(mrec);
+		mrec += 4;
 		ut_ad(mrec < mrec_end);
 
 		/* We assume extra_size < 0x100 for the PRIMARY KEY prefix.
@@ -2427,7 +2474,7 @@ row_log_table_apply_op(
 /******************************************************//**
 Applies operations to a table was rebuilt.
 @return DB_SUCCESS, or error code on failure */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 dberr_t
 row_log_table_apply_ops(
 /*====================*/
@@ -2519,7 +2566,8 @@ corruption:
 		if (index->online_log->head.blocks) {
 #ifdef HAVE_FTRUNCATE
 			/* Truncate the file in order to save space. */
-			if (ftruncate(index->online_log->fd, 0) == -1) {
+			if (index->online_log->fd != -1
+			    && ftruncate(index->online_log->fd, 0) == -1) {
 				fprintf(stderr, "InnoDB: Error: Truncate of file "
 					"\'%s\' failed with error %d:%s\n",
 					index->name + 1, errno, strerror(errno));
@@ -2586,7 +2634,7 @@ all_done:
 		and be ignored when the operation is unsupported. */
 		fallocate(index->online_log->fd,
 			  FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-			  ofs, srv_buf_size);
+			  ofs, srv_sort_buf_size);
 #endif /* FALLOC_FL_PUNCH_HOLE */
 
 		next_mrec = index->online_log->head.block;
@@ -2838,8 +2886,9 @@ row_log_allocate(
 	const dtuple_t*	add_cols,
 				/*!< in: default values of
 				added columns, or NULL */
-	const ulint*	col_map)/*!< in: mapping of old column
+	const ulint*	col_map,/*!< in: mapping of old column
 				numbers to new ones, or NULL if !table */
+	const char*	path)	/*!< in: where to create temporary file */
 {
 	row_log_t*	log;
 	DBUG_ENTER("row_log_allocate");
@@ -2858,11 +2907,7 @@ row_log_allocate(
 		DBUG_RETURN(false);
 	}
 
-	log->fd = row_merge_file_create_low();
-	if (log->fd < 0) {
-		ut_free(log);
-		DBUG_RETURN(false);
-	}
+	log->fd = -1;
 	mutex_create(index_online_log_key, &log->mutex,
 		     SYNC_INDEX_ONLINE_LOG);
 	log->blobs = NULL;
@@ -2877,6 +2922,7 @@ row_log_allocate(
 	log->tail.block = log->head.block = NULL;
 	log->head.blocks = log->head.bytes = 0;
 	log->head.total = 0;
+	log->path = path;
 	dict_index_set_online_status(index, ONLINE_INDEX_CREATION);
 	index->online_log = log;
 
@@ -2928,7 +2974,7 @@ row_log_get_max_trx(
 
 /******************************************************//**
 Applies an operation to a secondary index that was being created. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 row_log_apply_op_low(
 /*=================*/
@@ -3155,7 +3201,7 @@ func_exit:
 Applies an operation to a secondary index that was being created.
 @return NULL on failure (mrec corruption) or when out of data;
 pointer to next record on success */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 const mrec_t*
 row_log_apply_op(
 /*=============*/
@@ -3280,7 +3326,7 @@ corrupted:
 /******************************************************//**
 Applies operations to a secondary index that was being created.
 @return DB_SUCCESS, or error code on failure */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 dberr_t
 row_log_apply_ops(
 /*==============*/
@@ -3354,7 +3400,8 @@ corruption:
 		if (index->online_log->head.blocks) {
 #ifdef HAVE_FTRUNCATE
 			/* Truncate the file in order to save space. */
-			if (ftruncate(index->online_log->fd, 0) == -1) {
+			if (index->online_log->fd != -1
+			    && ftruncate(index->online_log->fd, 0) == -1) {
 				fprintf(stderr, "InnoDB: Error: Truncate of file "
 					"\'%s\' failed with error %d:%s\n",
 					index->name + 1, errno, strerror(errno));
@@ -3417,7 +3464,7 @@ all_done:
 		and be ignored when the operation is unsupported. */
 		fallocate(index->online_log->fd,
 			  FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
-			  ofs, srv_buf_size);
+			  ofs, srv_sort_buf_size);
 #endif /* FALLOC_FL_PUNCH_HOLE */
 
 		next_mrec = index->online_log->head.block;

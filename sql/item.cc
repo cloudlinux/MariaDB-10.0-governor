@@ -1,6 +1,6 @@
 /*
-   Copyright (c) 2000, 2014, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2015, MariaDB
+   Copyright (c) 2000, 2016, Oracle and/or its affiliates.
+   Copyright (c) 2010, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -21,7 +21,6 @@
 #endif
 #include <my_global.h>                          /* NO_EMBEDDED_ACCESS_CHECKS */
 #include "sql_priv.h"
-#include "unireg.h"                    // REQUIRED: for other includes
 #include <mysql.h>
 #include <m_ctype.h>
 #include "my_dir.h"
@@ -273,9 +272,6 @@ bool Item::get_date_with_conversion(MYSQL_TIME *ltime, ulonglong fuzzydate)
 */
 String *Item::val_str_ascii(String *str)
 {
-  if (!(collation.collation->state & MY_CS_NONASCII))
-    return val_str(str);
-  
   DBUG_ASSERT(str != &str_value);
   
   uint errors;
@@ -283,11 +279,15 @@ String *Item::val_str_ascii(String *str)
   if (!res)
     return 0;
   
-  if ((null_value= str->copy(res->ptr(), res->length(),
-                             collation.collation, &my_charset_latin1,
-                             &errors)))
-    return 0;
-  
+  if (!(res->charset()->state & MY_CS_NONASCII))
+    str= res;
+  else
+  {
+    if ((null_value= str->copy(res->ptr(), res->length(), collation.collation,
+                               &my_charset_latin1, &errors)))
+      return 0;
+  }
+
   return str;
 }
 
@@ -1206,7 +1206,8 @@ Item *Item_cache::safe_charset_converter(CHARSET_INFO *tocs)
   if (conv == example)
     return this;
   Item_cache *cache;
-  if (!conv || !(cache= new Item_cache_str(conv)))
+  if (!conv || conv->fix_fields(current_thd, (Item **) NULL) ||
+      !(cache= new Item_cache_str(conv)))
     return NULL; // Safe conversion is not possible, or OEM
   cache->setup(conv);
   cache->fixed= false; // Make Item::fix_fields() happy
@@ -1307,8 +1308,8 @@ Item *Item_param::safe_charset_converter(CHARSET_INFO *tocs)
     to it's possible that the converter will not be needed at all:
 
     PREPARE stmt FROM 'SELECT * FROM t1 WHERE field = ?';
-    SET @@arg= 1;
-    EXECUTE stms USING @arg;
+    SET @arg= 1;
+    EXECUTE stmt USING @arg;
 
     In the above example result_type is STRING_RESULT at prepare time,
     and INT_RESULT at execution time.
@@ -1885,6 +1886,8 @@ void Item::split_sum_func2(THD *thd, Item **ref_pointer_array,
     */
     Item_aggregate_ref *item_ref;
     uint el= fields.elements;
+    DBUG_ASSERT(fields.elements <=
+                thd->lex->current_select->ref_pointer_array_size);
     /*
       If this is an item_ref, get the original item
       This is a safety measure if this is called for things that is
@@ -2740,10 +2743,67 @@ void Item_field::fix_after_pullout(st_select_lex *new_parent, Item **ref)
     depended_from= NULL;
   if (context)
   {
+    bool need_change= false;
+    /*
+      Suppose there are nested selects:
+
+       select_id=1
+         select_id=2
+           select_id=3  <----+
+             select_id=4    -+
+               select_id=5 --+
+
+      Suppose, pullout operation has moved anything that had select_id=4 or 5
+      in to select_id=3.
+
+      If this Item_field had a name resolution context pointing into select_lex
+      with id=4 or id=5, it needs a new name resolution context.
+
+      However, it could also be that this object is a part of outer reference:
+      Item_ref(Item_field(field in select with select_id=1))).
+      - The Item_ref object has a context with select_id=5, and so needs a new
+        name resolution context.
+      - The Item_field object has a context with select_id=1, and doesn't need
+        a new name resolution context.
+
+      So, the following loop walks from Item_field's current context upwards.
+      If we find that the select we've been pulled out to is up there, we
+      create the new name resolution context. Otherwise, we don't.
+    */
+    for (Name_resolution_context *ct= context; ct; ct= ct->outer_context)
+    {
+      if (new_parent == ct->select_lex)
+      {
+        need_change= true;
+        break;
+      }
+    }
+    if (!need_change)
+      return;
+
     Name_resolution_context *ctx= new Name_resolution_context();
-    ctx->outer_context= NULL; // We don't build a complete name resolver
-    ctx->table_list= NULL;    // We rely on first_name_resolution_table instead
+    if (context->select_lex == new_parent)
+    {
+      /*
+        This field was pushed in then pulled out
+        (for example left part of IN)
+      */
+      ctx->outer_context= context->outer_context;
+    }
+    else if (context->outer_context)
+    {
+      /* just pull to the upper context */
+      ctx->outer_context= context->outer_context->outer_context;
+    }
+    else
+    {
+      /* No upper context (merging Derived/VIEW where context chain ends) */
+      ctx->outer_context= NULL;
+    }
+    ctx->table_list= context->first_name_resolution_table;
     ctx->select_lex= new_parent;
+    if (context->select_lex == NULL)
+      ctx->select_lex= NULL;
     ctx->first_name_resolution_table= context->first_name_resolution_table;
     ctx->last_name_resolution_table=  context->last_name_resolution_table;
     ctx->error_processor=             context->error_processor;
@@ -3834,7 +3894,7 @@ Item_param::eq(const Item *item, bool binary_cmp) const
 
 void Item_param::print(String *str, enum_query_type query_type)
 {
-  if (state == NO_VALUE)
+  if (state == NO_VALUE || query_type & QT_NO_DATA_EXPANSION)
   {
     str->append('?');
   }
@@ -4363,18 +4423,23 @@ static bool mark_as_dependent(THD *thd, SELECT_LEX *last, SELECT_LEX *current,
                               Item_ident *resolved_item,
                               Item_ident *mark_item)
 {
-  const char *db_name= (resolved_item->db_name ?
-                        resolved_item->db_name : "");
-  const char *table_name= (resolved_item->table_name ?
-                           resolved_item->table_name : "");
+  DBUG_ENTER("mark_as_dependent");
+
   /* store pointer on SELECT_LEX from which item is dependent */
   if (mark_item && mark_item->can_be_depended)
+  {
+    DBUG_PRINT("info", ("mark_item: %p  lex: %p", mark_item, last));
     mark_item->depended_from= last;
-  if (current->mark_as_dependent(thd, last, /** resolved_item psergey-thu
-    **/mark_item))
-    return TRUE;
+  }
+  if (current->mark_as_dependent(thd, last,
+                                 /** resolved_item psergey-thu **/ mark_item))
+    DBUG_RETURN(TRUE);
   if (thd->lex->describe & DESCRIBE_EXTENDED)
   {
+    const char *db_name= (resolved_item->db_name ?
+                          resolved_item->db_name : "");
+    const char *table_name= (resolved_item->table_name ?
+                             resolved_item->table_name : "");
     push_warning_printf(thd, Sql_condition::WARN_LEVEL_NOTE,
 		 ER_WARN_FIELD_RESOLVED, ER(ER_WARN_FIELD_RESOLVED),
                  db_name, (db_name[0] ? "." : ""),
@@ -4382,7 +4447,7 @@ static bool mark_as_dependent(THD *thd, SELECT_LEX *last, SELECT_LEX *current,
                  resolved_item->field_name,
                  current->select_number, last->select_number);
   }
-  return FALSE;
+  DBUG_RETURN(FALSE);
 }
 
 
@@ -4472,8 +4537,6 @@ static Item** find_field_in_group_list(Item *find_item, ORDER *group_list)
   const char *field_name;
   ORDER      *found_group= NULL;
   int         found_match_degree= 0;
-  Item_ident *cur_field;
-  int         cur_match_degree= 0;
   char        name_buff[SAFE_NAME_LEN+1];
 
   if (find_item->type() == Item::FIELD_ITEM ||
@@ -4498,54 +4561,70 @@ static Item** find_field_in_group_list(Item *find_item, ORDER *group_list)
 
   for (ORDER *cur_group= group_list ; cur_group ; cur_group= cur_group->next)
   {
-    if ((*(cur_group->item))->real_item()->type() == Item::FIELD_ITEM)
+    int cur_match_degree= 0;
+
+    /* SELECT list element with explicit alias */
+    if ((*(cur_group->item))->name &&
+        !(*(cur_group->item))->is_autogenerated_name &&
+        !my_strcasecmp(system_charset_info,
+                       (*(cur_group->item))->name, field_name))
     {
-      cur_field= (Item_ident*) *cur_group->item;
-      cur_match_degree= 0;
-      
-      DBUG_ASSERT(cur_field->field_name != 0);
+      ++cur_match_degree;
+    }
+    /* Reference on the field or view/derived field. */
+    else if ((*(cur_group->item))->type() == Item::FIELD_ITEM ||
+             (*(cur_group->item))->type() == Item::REF_ITEM )
+    {
+      Item_ident *cur_field= (Item_ident*) *cur_group->item;
+      const char *l_db_name= cur_field->db_name;
+      const char *l_table_name= cur_field->table_name;
+      const char *l_field_name= cur_field->field_name;
+
+      DBUG_ASSERT(l_field_name != 0);
 
       if (!my_strcasecmp(system_charset_info,
-                         cur_field->field_name, field_name))
+                         l_field_name, field_name))
         ++cur_match_degree;
       else
         continue;
 
-      if (cur_field->table_name && table_name)
+      if (l_table_name && table_name)
       {
         /* If field_name is qualified by a table name. */
-        if (my_strcasecmp(table_alias_charset, cur_field->table_name, table_name))
+        if (my_strcasecmp(table_alias_charset, l_table_name, table_name))
           /* Same field names, different tables. */
           return NULL;
 
         ++cur_match_degree;
-        if (cur_field->db_name && db_name)
+        if (l_db_name && db_name)
         {
           /* If field_name is also qualified by a database name. */
-          if (strcmp(cur_field->db_name, db_name))
+          if (strcmp(l_db_name, db_name))
             /* Same field names, different databases. */
             return NULL;
           ++cur_match_degree;
         }
       }
+    }
+    else
+      continue;
 
-      if (cur_match_degree > found_match_degree)
-      {
-        found_match_degree= cur_match_degree;
-        found_group= cur_group;
-      }
-      else if (found_group && (cur_match_degree == found_match_degree) &&
-               ! (*(found_group->item))->eq(cur_field, 0))
-      {
-        /*
-          If the current resolve candidate matches equally well as the current
-          best match, they must reference the same column, otherwise the field
-          is ambiguous.
-        */
-        my_error(ER_NON_UNIQ_ERROR, MYF(0),
-                 find_item->full_name(), current_thd->where);
-        return NULL;
-      }
+    if (cur_match_degree > found_match_degree)
+    {
+      found_match_degree= cur_match_degree;
+      found_group= cur_group;
+    }
+    else if (found_group && (cur_match_degree == found_match_degree) &&
+             !(*(found_group->item))->eq((*(cur_group->item)), 0))
+    {
+      /*
+        If the current resolve candidate matches equally well as the current
+        best match, they must reference the same column, otherwise the field
+        is ambiguous.
+      */
+      my_error(ER_NON_UNIQ_ERROR, MYF(0),
+               find_item->full_name(), current_thd->where);
+      return NULL;
     }
   }
 
@@ -4746,7 +4825,7 @@ bool is_outer_table(TABLE_LIST *table, SELECT_LEX *select)
   @retval
     0   column fully fixed and fix_fields() should return FALSE
   @retval
-    -1  error occured
+    -1  error occurred
 */
 
 int
@@ -4830,8 +4909,24 @@ Item_field::fix_outer_field(THD *thd, Field **from_field, Item **reference)
             As this is an outer field it should be added to the list of
             non aggregated fields of the outer select.
           */
-          marker= select->cur_pos_in_select_list;
-          select->non_agg_fields.push_back(this);
+          if (select->join)
+          {
+            marker= select->cur_pos_in_select_list;
+            select->join->non_agg_fields.push_back(this);
+          }
+          else
+          {
+            /*
+              join is absent if it is upper SELECT_LEX of non-select
+              command
+            */
+            DBUG_ASSERT(select->master_unit()->outer_select() == NULL &&
+                        (thd->lex->sql_command != SQLCOM_SELECT &&
+                         thd->lex->sql_command != SQLCOM_UPDATE_MULTI &&
+                         thd->lex->sql_command != SQLCOM_DELETE_MULTI &&
+                         thd->lex->sql_command != SQLCOM_INSERT_SELECT &&
+                         thd->lex->sql_command != SQLCOM_REPLACE_SELECT));
+          }
         }
         if (*from_field != view_ref_found)
         {
@@ -5247,9 +5342,10 @@ bool Item_field::fix_fields(THD *thd, Item **reference)
   fixed= 1;
   if (thd->variables.sql_mode & MODE_ONLY_FULL_GROUP_BY &&
       !outer_fixed && !thd->lex->in_sum_func &&
-      thd->lex->current_select->cur_pos_in_select_list != UNDEF_POS)
+      thd->lex->current_select->cur_pos_in_select_list != UNDEF_POS &&
+      thd->lex->current_select->join)
   {
-    thd->lex->current_select->non_agg_fields.push_back(this);
+    thd->lex->current_select->join->non_agg_fields.push_back(this);
     marker= thd->lex->current_select->cur_pos_in_select_list;
   }
 mark_non_agg_field:
@@ -5632,6 +5728,7 @@ String *Item::check_well_formed_result(String *str, bool send_error)
   /* Check whether we got a well-formed string */
   CHARSET_INFO *cs= str->charset();
   uint wlen= str->well_formed_length();
+  null_value= false;
   if (wlen < str->length())
   {
     THD *thd= current_thd;
@@ -6680,7 +6777,7 @@ void Item_field::update_null_value()
     UPDATE statement.
 
   RETURN
-    0             if error occured
+    0             if error occurred
     ref           if all conditions are met
     this field    otherwise
 */
@@ -6695,6 +6792,7 @@ Item *Item_field::update_value_transformer(uchar *select_arg)
   {
     List<Item> *all_fields= &select->join->all_fields;
     Item **ref_pointer_array= select->ref_pointer_array;
+    DBUG_ASSERT(all_fields->elements <= select->ref_pointer_array_size);
     int el= all_fields->elements;
     Item_ref *ref;
 
@@ -6710,7 +6808,8 @@ Item *Item_field::update_value_transformer(uchar *select_arg)
 
 void Item_field::print(String *str, enum_query_type query_type)
 {
-  if (field && field->table->const_table)
+  if (field && field->table->const_table &&
+      !(query_type & QT_NO_DATA_EXPANSION))
   {
     print_value(str);
     return;
@@ -6730,7 +6829,7 @@ Item_ref::Item_ref(Name_resolution_context *context_arg,
   /*
     This constructor used to create some internals references over fixed items
   */
-  if (ref && *ref && (*ref)->fixed)
+  if ((set_properties_only= (ref && *ref && (*ref)->fixed)))
     set_properties();
 }
 
@@ -6774,7 +6873,7 @@ Item_ref::Item_ref(TABLE_LIST *view_arg, Item **item,
   /*
     This constructor is used to create some internal references over fixed items
   */
-  if (ref && *ref && (*ref)->fixed)
+  if ((set_properties_only= (ref && *ref && (*ref)->fixed)))
     set_properties();
 }
 
@@ -6849,7 +6948,11 @@ bool Item_ref::fix_fields(THD *thd, Item **reference)
   DBUG_ASSERT(fixed == 0);
   SELECT_LEX *current_sel= thd->lex->current_select;
 
-  if (!ref || ref == not_found_item)
+  if (set_properties_only)
+  {
+    /* do nothing */
+  }
+  else if (!ref || ref == not_found_item)
   {
     DBUG_ASSERT(reference_trough_name != 0);
     if (!(ref= resolve_ref_in_select_and_group(thd, this,
@@ -6867,7 +6970,7 @@ bool Item_ref::fix_fields(THD *thd, Item **reference)
       {
         /* The current reference cannot be resolved in this query. */
         my_error(ER_BAD_FIELD_ERROR,MYF(0),
-                 this->full_name(), current_thd->where);
+                 this->full_name(), thd->where);
         goto error;
       }
 
@@ -7002,7 +7105,7 @@ bool Item_ref::fix_fields(THD *thd, Item **reference)
           goto error;
         thd->change_item_tree(reference, fld);
         mark_as_dependent(thd, last_checked_context->select_lex,
-                          thd->lex->current_select, fld, fld);
+                          current_sel, fld, fld);
         /*
           A reference is resolved to a nest level that's outer or the same as
           the nest level of the enclosing set function : adjust the value of
@@ -7019,7 +7122,7 @@ bool Item_ref::fix_fields(THD *thd, Item **reference)
       {
         /* The item was not a table field and not a reference */
         my_error(ER_BAD_FIELD_ERROR, MYF(0),
-                 this->full_name(), current_thd->where);
+                 this->full_name(), thd->where);
         goto error;
       }
       /* Should be checked in resolve_ref_in_select_and_group(). */
@@ -9883,4 +9986,3 @@ const char *dbug_print_item(Item *item)
 }
 
 #endif /*DBUG_OFF*/
-

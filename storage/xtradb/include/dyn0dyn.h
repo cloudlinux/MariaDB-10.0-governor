@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2013, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -46,9 +46,8 @@ UNIV_INLINE
 dyn_array_t*
 dyn_array_create(
 /*=============*/
-	dyn_array_t*	arr)	/*!< in/out memory buffer of
+	dyn_array_t*	arr);	/*!< in/out memory buffer of
 				size sizeof(dyn_array_t) */
-	__attribute__((nonnull));
 /************************************************************//**
 Frees a dynamic array. */
 UNIV_INLINE
@@ -56,7 +55,7 @@ void
 dyn_array_free(
 /*===========*/
 	dyn_array_t*	arr)	/*!< in,own: dyn array */
-	__attribute__((nonnull));
+	MY_ATTRIBUTE((nonnull));
 /*********************************************************************//**
 Makes room on top of a dyn array and returns a pointer to a buffer in it.
 After copying the elements, the caller must close the buffer using
@@ -69,7 +68,7 @@ dyn_array_open(
 	dyn_array_t*	arr,	/*!< in: dynamic array */
 	ulint		size)	/*!< in: size in bytes of the buffer; MUST be
 				smaller than DYN_ARRAY_DATA_SIZE! */
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((warn_unused_result));
 /*********************************************************************//**
 Closes the buffer returned by dyn_array_open. */
 UNIV_INLINE
@@ -77,8 +76,7 @@ void
 dyn_array_close(
 /*============*/
 	dyn_array_t*	arr,	/*!< in: dynamic array */
-	const byte*	ptr)	/*!< in: end of used space */
-	__attribute__((nonnull));
+	const byte*	ptr);	/*!< in: end of used space */
 /*********************************************************************//**
 Makes room on top of a dyn array and returns a pointer to
 the added element. The caller must copy the element to
@@ -90,7 +88,7 @@ dyn_array_push(
 /*===========*/
 	dyn_array_t*	arr,	/*!< in/out: dynamic array */
 	ulint		size)	/*!< in: size in bytes of the element */
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((warn_unused_result));
 /************************************************************//**
 Returns pointer to an element in dyn array.
 @return	pointer to element */
@@ -101,7 +99,7 @@ dyn_array_get_element(
 	const dyn_array_t*	arr,	/*!< in: dyn array */
 	ulint			pos)	/*!< in: position of element
 					in bytes from array start */
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((warn_unused_result));
 /************************************************************//**
 Returns the size of stored data in a dyn array.
 @return	data size in bytes */
@@ -110,7 +108,7 @@ ulint
 dyn_array_get_data_size(
 /*====================*/
 	const dyn_array_t*	arr)	/*!< in: dyn array */
-	__attribute__((nonnull, warn_unused_result, pure));
+	MY_ATTRIBUTE((warn_unused_result));
 /************************************************************//**
 Gets the first block in a dyn array.
 @param arr	dyn array
@@ -144,7 +142,7 @@ ulint
 dyn_block_get_used(
 /*===============*/
 	const dyn_block_t*	block)	/*!< in: dyn array block */
-	__attribute__((nonnull, warn_unused_result, pure));
+	MY_ATTRIBUTE((warn_unused_result));
 /********************************************************************//**
 Gets pointer to the start of data in a dyn array block.
 @return	pointer to data */
@@ -153,7 +151,7 @@ byte*
 dyn_block_get_data(
 /*===============*/
 	const dyn_block_t*	block)	/*!< in: dyn array block */
-	__attribute__((nonnull, warn_unused_result, pure));
+	MY_ATTRIBUTE((warn_unused_result));
 /********************************************************//**
 Pushes n bytes to a dyn array. */
 UNIV_INLINE
@@ -163,7 +161,7 @@ dyn_push_string(
 	dyn_array_t*	arr,	/*!< in/out: dyn array */
 	const byte*	str,	/*!< in: string to write */
 	ulint		len)	/*!< in: string length */
-	__attribute__((nonnull));
+	MY_ATTRIBUTE((nonnull));
 
 /*#################################################################*/
 

@@ -33,7 +33,8 @@ enum enum_mysql_completiontype {
   COMMIT_RELEASE=-1,   COMMIT=0,    COMMIT_AND_CHAIN=6
 };
 
-extern "C" int test_if_data_home_dir(const char *dir);
+extern "C" int path_starts_from_data_home_dir(const char *dir);
+int test_if_data_home_dir(const char *dir);
 int error_if_data_home_dir(const char *path, const char *what);
 
 bool multi_update_precheck(THD *thd, TABLE_LIST *tables);
@@ -48,13 +49,11 @@ bool create_table_precheck(THD *thd, TABLE_LIST *tables,
                            TABLE_LIST *create_table);
 bool check_fk_parent_table_access(THD *thd,
                                   HA_CREATE_INFO *create_info,
-                                  Alter_info *alter_info);
+                                  Alter_info *alter_info,
+                                  const char* create_db);
 
 bool parse_sql(THD *thd, Parser_state *parser_state,
                Object_creation_ctx *creation_ctx, bool do_pfs_digest=false);
-
-uint kill_user_thread(THD *thd, char *user, bool only_kill_query);
-uint kill_user_thread_lve(THD *thd, char *user, bool only_kill_query);
 
 void free_items(Item *item);
 void cleanup_items(Item *item);
@@ -78,6 +77,7 @@ bool check_string_byte_length(LEX_STRING *str, const char *err_msg,
 bool check_string_char_length(LEX_STRING *str, const char *err_msg,
                               uint max_char_length, CHARSET_INFO *cs,
                               bool no_error);
+bool check_ident_length(LEX_STRING *ident);
 CHARSET_INFO* merge_charset_and_collation(CHARSET_INFO *cs, CHARSET_INFO *cl);
 bool check_host_name(LEX_STRING *str);
 bool check_identifier_name(LEX_STRING *str, uint max_char_length,

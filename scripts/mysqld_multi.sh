@@ -17,7 +17,7 @@
 # Software Foundation, Inc., 51 Franklin St, Fifth Floor, Boston,
 # MA 02110-1301, USA
 
-# Copyright (c) 2000, 2010, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2000, 2016, Oracle and/or its affiliates. All rights reserved.
 #
 # This program is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Library General Public
@@ -486,6 +486,7 @@ sub get_mysqladmin_options
 
 # Return a list of option files which can be opened.  Similar, but not
 # identical, to behavior of my_search_option_files()
+# TODO implement and use my_print_defaults --list-groups instead
 sub list_defaults_files
 {
   my %opt;
@@ -497,9 +498,7 @@ sub list_defaults_files
 
   return ($opt{file}) if exists $opt{file};
 
-  my %seen;  # Don't list the same file more than once
-  return grep { defined $_ and not $seen{$_}++ and -f $_ and -r $_ }
-              ('@sysconfdir@/my.cnf',
+  return      ('@sysconfdir@/my.cnf',
                '@sysconfdir@/mysql/my.cnf',
                '@prefix@/my.cnf',
                ($ENV{MYSQL_HOME} ? "$ENV{MYSQL_HOME}/my.cnf" : undef),
@@ -539,11 +538,12 @@ sub find_groups
     }
   }
 
+  my %seen;
   my @defaults_files = list_defaults_files();
-  #warn "@{[sort keys %gids]} -> @defaults_files\n";
-  foreach my $file (@defaults_files)
+  while (@defaults_files)
   {
-    next unless open CONF, "< $file";
+    my $file = shift @defaults_files;
+    next unless defined $file and not $seen{$file}++ and open CONF, '<', $file;
 
     while (<CONF>)
     {
@@ -555,6 +555,14 @@ sub find_groups
         {
           push @groups, "$1$2";
         }
+      }
+      elsif (/^\s*!include\s+(\S.*?)\s*$/)
+      {
+        push @defaults_files, $1;
+      }
+      elsif (/^\s*!includedir\s+(\S.*?)\s*$/)
+      {
+        push @defaults_files, <$1/*.cnf>;
       }
     }
 
@@ -613,7 +621,11 @@ sub my_which
   my ($command) = @_;
   my (@paths, $path);
 
-  return $command if (-f $command && -x $command);
+ # If the argument is not 'my_print_defaults' then it would be of the format
+ # <absolute_path>/<program>
+ return $command if ($command ne 'my_print_defaults' && -f $command &&
+                     -x $command);
+
   @paths = split(':', $ENV{'PATH'});
   foreach $path (@paths)
   {

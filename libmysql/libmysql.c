@@ -450,8 +450,9 @@ void read_user_name(char *name)
 
 void read_user_name(char *name)
 {
-  char *str=getenv("USER");		/* ODBC will send user variable */
-  strmake(name,str ? str : "ODBC", USERNAME_LENGTH);
+  DWORD len= USERNAME_LENGTH;
+  if (!GetUserName(name, &len))
+    strmov(name,"UNKNOWN_USER");
 }
 
 #endif
@@ -2232,7 +2233,7 @@ static int stmt_read_row_buffered(MYSQL_STMT *stmt, unsigned char **row)
 
 /*
   Read one row from network: unbuffered non-cursor fetch.
-  If last row was read, or error occured, erase this statement
+  If last row was read, or error occurred, erase this statement
   from record pointing to object unbuffered fetch is performed from.
 
   SYNOPSIS

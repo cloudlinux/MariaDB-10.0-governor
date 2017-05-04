@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2013, Monty Program Ab
+   Copyright (c) 2009, 2016, MariaDB
 
    This library is free software; you can redistribute it and/or
    modify it under the terms of the GNU Library General Public
@@ -7113,7 +7113,7 @@ my_wc_mb_filename(CHARSET_INFO *cs __attribute__((unused)),
   }
 
   /* Non letter */
-  if (s + 5 > e)
+  if (s + 4 > e)
     return MY_CS_TOOSMALL5;
 
   *s++= hex[(wc >> 12) & 15];

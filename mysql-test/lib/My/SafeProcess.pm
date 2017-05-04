@@ -34,7 +34,7 @@ package My::SafeProcess;
 #    will zap the "monitored process" and exit
 #  - the "monitored process" to exit, in which case it will exit
 #    itself with same exit code as the "monitored process"
-#  - the parent process to send the "shutdown" signal in wich case
+#  - the parent process to send the "shutdown" signal in which case
 #    monitor will kill the "monitored process" hard and exit
 #
 #
@@ -338,7 +338,7 @@ sub dump_core {
   my ($self)= @_;
   return if IS_WINDOWS;
   my $pid= $self->{SAFE_PID};
-  die "Can't cet core from not started process" unless defined $pid;
+  die "Can't get core from not started process" unless defined $pid;
   _verbose("Sending ABRT to $self");
   kill ("ABRT", $pid);
   return 1;

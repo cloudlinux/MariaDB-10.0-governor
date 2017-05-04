@@ -1,6 +1,6 @@
 /*
-   Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2015, MariaDB
+   Copyright (c) 2000, 2016, Oracle and/or its affiliates.
+   Copyright (c) 2009, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -21,15 +21,13 @@
 /* Classes in mysql */
 
 #include "my_global.h"                          /* NO_EMBEDDED_ACCESS_CHECKS */
-#ifdef MYSQL_SERVER
-#include "unireg.h"                    // REQUIRED: for other includes
-#endif
 #include <waiting_threads.h>
 #include "sql_const.h"
 #include <mysql/plugin_audit.h>
 #include "log.h"
 #include "rpl_tblmap.h"
 #include "mdl.h"
+#include "field.h"                              // Create_field
 #include "probes_mysql.h"
 #include "sql_locale.h"                         /* my_locale_st */
 #include "sql_profile.h"                   /* PROFILING */
@@ -64,7 +62,6 @@ class Reprepare_observer;
 class Relay_log_info;
 struct rpl_group_info;
 class Rpl_filter;
-
 class Query_log_event;
 class Load_log_event;
 class Slave_log_event;
@@ -75,6 +72,7 @@ class Parser_state;
 class Rows_log_event;
 class Sroutine_hash_entry;
 class user_var_entry;
+struct Trans_binlog_info;
 class rpl_io_thread_info;
 class rpl_sql_thread_info;
 
@@ -658,6 +656,7 @@ typedef struct system_status_var
 {
   ulong com_other;
   ulong com_stat[(uint) SQLCOM_END];
+  ulong com_register_slave;
   ulong created_tmp_disk_tables_;
   ulong created_tmp_tables_;
   ulong ha_commit_count;
@@ -667,9 +666,11 @@ typedef struct system_status_var
   ulong ha_read_key_count;
   ulong ha_read_next_count;
   ulong ha_read_prev_count;
+  ulong ha_read_retry_count;
   ulong ha_read_rnd_count;
   ulong ha_read_rnd_next_count;
   ulong ha_read_rnd_deleted_count;
+
   /*
     This number doesn't include calls to the default implementation and
     calls made by range access. The intent is to count only calls made by
@@ -703,6 +704,8 @@ typedef struct system_status_var
   ulong select_range_count_;
   ulong select_range_check_count_;
   ulong select_scan_count_;
+  ulong update_scan_count;
+  ulong delete_scan_count;
   ulong executed_triggers;
   ulong long_query_count;
   ulong filesort_merge_passes_;
@@ -1179,7 +1182,8 @@ enum enum_locked_tables_mode
   LTM_NONE= 0,
   LTM_LOCK_TABLES,
   LTM_PRELOCKED,
-  LTM_PRELOCKED_UNDER_LOCK_TABLES
+  LTM_PRELOCKED_UNDER_LOCK_TABLES,
+  LTM_always_last
 };
 
 
@@ -1959,6 +1963,9 @@ public:
   */
   const char *where;
 
+  /* Needed by MariaDB semi sync replication */
+  Trans_binlog_info *semisync_info;
+
   ulong client_capabilities;		/* What the client supports */
   ulong max_client_packet_length;
 
@@ -2027,10 +2034,10 @@ public:
   /* Do not set socket timeouts for wait_timeout (used with threadpool) */
   bool skip_wait_timeout;
 
-  /* container for handler's private per-connection data */
-  Ha_data ha_data[MAX_HA];
-
   bool prepare_derived_at_open;
+
+  /* Set to 1 if status of this THD is already in global status */
+  bool status_in_global;
 
   /* 
     To signal that the tmp table to be created is created for materialized
@@ -2039,6 +2046,9 @@ public:
   bool create_tmp_table_for_derived;
 
   bool save_prep_leaf_list;
+
+  /* container for handler's private per-connection data */
+  Ha_data ha_data[MAX_HA];
 
 #ifndef MYSQL_CLIENT
   binlog_cache_mngr *  binlog_setup_trx_data();
@@ -2094,6 +2104,18 @@ public:
     DBUG_ASSERT(current_stmt_binlog_format == BINLOG_FORMAT_STMT ||
                 current_stmt_binlog_format == BINLOG_FORMAT_ROW);
     return current_stmt_binlog_format == BINLOG_FORMAT_ROW;
+  }
+  /**
+    Determine if binlogging is disabled for this session
+    @retval 0 if the current statement binlogging is disabled
+              (could be because of binlog closed/binlog option
+               is set to false).
+    @retval 1 if the current statement will be binlogged
+  */
+  inline bool is_current_stmt_binlog_disabled() const
+  {
+    return (!(variables.option_bits & OPTION_BIN_LOG) ||
+            !mysql_bin_log.is_open());
   }
 
   enum binlog_filter_state
@@ -2501,9 +2523,6 @@ public:
       killed= ABORT_QUERY;
   }
 
-  const USER_CONN* get_user_connect()
-  { return user_connect; }
-
   USER_CONN *user_connect;
   CHARSET_INFO *db_charset;
 #if defined(ENABLED_PROFILING)
@@ -2547,7 +2566,6 @@ public:
   ulong      query_plan_flags; 
   ulong      query_plan_fsort_passes; 
   pthread_t  real_id;                           /* For debugging */
-  pid_t      thread_tid_cll;
   my_thread_id  thread_id;
   uint	     tmp_table, global_disable_checkpoint;
   uint	     server_status,open_options;
@@ -2968,12 +2986,12 @@ public:
     set_start_time();
     start_utime= utime_after_lock= microsecond_interval_timer();
   }
-  inline void	set_time(my_hrtime_t t)
+  inline void set_time(my_hrtime_t t)
   {
     user_time= t;
     set_time();
   }
-  inline void	set_time(my_time_t t, ulong sec_part)
+  inline void set_time(my_time_t t, ulong sec_part)
   {
     my_hrtime_t hrtime= { hrtime_from_time(t) + sec_part };
     set_time(hrtime);
@@ -3658,26 +3676,7 @@ public:
     }
   }
 
-private:
-  /* 
-    This reference points to the table arena when the expression
-    for a virtual column is being evaluated
-  */ 
-  Query_arena *arena_for_cached_items;
-
 public:
-  void reset_arena_for_cached_items(Query_arena *new_arena)
-  {
-    arena_for_cached_items= new_arena;
-  }
-  Query_arena *switch_to_arena_for_cached_items(Query_arena *backup)
-  {
-    if (!arena_for_cached_items)
-      return 0;
-    set_n_backup_active_arena(arena_for_cached_items, backup);
-    return backup;
-  }
-
   void clear_wakeup_ready() { wakeup_ready= false; }
   /*
     Sleep waiting for others to wake us up with signal_wakeup_ready().
@@ -3691,6 +3690,8 @@ public:
   {
     mysql_mutex_lock(&LOCK_status);
     add_to_status(&global_status_var, &status_var);
+    /* Mark that this THD status has already been added in global status */
+    status_in_global= 1;
     mysql_mutex_unlock(&LOCK_status);
   }
 
@@ -3763,7 +3764,7 @@ private:
 
   /* Protect against add/delete of temporary tables in parallel replication */
   void rgi_lock_temporary_tables();
-  void rgi_unlock_temporary_tables();
+  void rgi_unlock_temporary_tables(bool clear);
   bool rgi_have_temporary_tables();
 public:
   /*
@@ -3787,15 +3788,15 @@ public:
     if (rgi_slave)
       rgi_lock_temporary_tables();
   }
-  inline void unlock_temporary_tables()
+  inline void unlock_temporary_tables(bool clear)
   {
     if (rgi_slave)
-      rgi_unlock_temporary_tables();
+      rgi_unlock_temporary_tables(clear);
   }    
   inline bool have_temporary_tables()
   {
     return (temporary_tables ||
-            (rgi_slave && rgi_have_temporary_tables()));
+            (rgi_slave && unlikely(rgi_have_temporary_tables())));
   }
 };
 
@@ -4171,10 +4172,14 @@ public:
 #define TMP_ENGINE_COLUMNDEF MARIA_COLUMNDEF
 #define TMP_ENGINE_HTON maria_hton
 #define TMP_ENGINE_NAME "Aria"
+inline uint tmp_table_max_key_length() { return maria_max_key_length(); }
+inline uint tmp_table_max_key_parts() { return maria_max_key_segments(); }
 #else
 #define TMP_ENGINE_COLUMNDEF MI_COLUMNDEF
 #define TMP_ENGINE_HTON myisam_hton
 #define TMP_ENGINE_NAME "MyISAM"
+inline uint tmp_table_max_key_length() { return MI_MAX_KEY_LENGTH; }
+inline uint tmp_table_max_key_parts() { return MI_MAX_KEY_SEG; }
 #endif
 
 /*
@@ -4278,6 +4283,11 @@ public:
       save_copy_field= copy_field= NULL;
       save_copy_field_end= copy_field_end= NULL;
     }
+  }
+  void free_copy_field_data()
+  {
+    for (Copy_field *ptr= copy_field ; ptr != copy_field_end ; ptr++)
+      ptr->tmp.free();
   }
 };
 

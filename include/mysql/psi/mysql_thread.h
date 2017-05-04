@@ -565,12 +565,25 @@ typedef struct st_mysql_cond mysql_cond_t;
   @param P3 pthread_create parameter 3
   @param P4 pthread_create parameter 4
 */
+
 #ifdef HAVE_PSI_THREAD_INTERFACE
   #define mysql_thread_create(K, P1, P2, P3, P4) \
     inline_mysql_thread_create(K, P1, P2, P3, P4)
 #else
+  int lve_pthread_create (pthread_t *__restrict __newthread,
+	       __const pthread_attr_t *__restrict __attr,
+	    	       void *(*__start_routine) (void *),
+	    	    	       void *__restrict __arg){
+	int rc  = 0;
+	my_reserve_slot();
+	rc = pthread_create(__newthread, __attr, __start_routine, __arg);
+	my_release_slot();
+	return rc;
+  }
+
+
   #define mysql_thread_create(K, P1, P2, P3, P4) \
-    pthread_create(P1, P2, P3, P4)
+    lve_pthread_create(P1, P2, P3, P4)
 #endif
 
 /**
@@ -1252,7 +1265,9 @@ static inline int inline_mysql_thread_create(
   void *(*start_routine)(void*), void *arg)
 {
   int result;
+  my_reserve_slot();
   result= PSI_THREAD_CALL(spawn_thread)(key, thread, attr, start_routine, arg);
+  my_release_slot();
   return result;
 }
 

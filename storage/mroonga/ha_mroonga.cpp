@@ -4184,9 +4184,12 @@ int ha_mroonga::storage_open(const char *name, int mode, uint test_if_locked)
   if (!(ha_thd()->open_options & HA_OPEN_FOR_REPAIR)) {
     error = storage_open_indexes(name);
     if (error) {
-      // TODO: free grn_columns and set NULL;
       grn_obj_unlink(ctx, grn_table);
       grn_table = NULL;
+      // TODO: unlink elements
+      free(grn_columns);
+      // TODO: unlink elements
+      free(grn_column_ranges);
       DBUG_RETURN(error);
     }
 
@@ -8765,7 +8768,7 @@ void ha_mroonga::remove_related_files(const char *base_path)
       if (stat(entry->d_name, &file_status) != 0) {
         continue;
       }
-      if (!((file_status.st_mode & S_IFMT) && S_IFREG)) {
+      if (!((file_status.st_mode & S_IFMT) & S_IFREG)) {
         continue;
       }
       if (strncmp(entry->d_name, base_path, base_path_length) == 0) {

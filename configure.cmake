@@ -228,7 +228,6 @@ CHECK_INCLUDE_FILES (sys/socket.h HAVE_SYS_SOCKET_H)
 CHECK_INCLUDE_FILES (sys/stat.h HAVE_SYS_STAT_H)
 CHECK_INCLUDE_FILES (sys/stream.h HAVE_SYS_STREAM_H)
 CHECK_INCLUDE_FILES (sys/termcap.h HAVE_SYS_TERMCAP_H)
-CHECK_INCLUDE_FILES ("curses.h;term.h" HAVE_TERM_H)
 CHECK_INCLUDE_FILES (asm/termbits.h HAVE_ASM_TERMBITS_H)
 CHECK_INCLUDE_FILES (termbits.h HAVE_TERMBITS_H)
 CHECK_INCLUDE_FILES (termios.h HAVE_TERMIOS_H)
@@ -547,6 +546,7 @@ MY_CHECK_TYPE_SIZE(mode_t MODE_T)
 IF(NOT SIZEOF_MODE_T)
  SET(mode_t int)
 ENDIF()
+MY_CHECK_TYPE_SIZE(sighandler_t SIGHANDLER_T)
 
 IF(HAVE_NETINET_IN_H)
   SET(CMAKE_EXTRA_INCLUDE_FILES netinet/in.h)
@@ -789,16 +789,36 @@ ENDIF()
 #
 # Test for how the C compiler does inline, if at all
 #
+# SunPro is weird, apparently it only supports inline at -xO3 or -xO4.
+# And if CMAKE_C_FLAGS has -xO4 but CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE} has -xO2
+# then CHECK_C_SOURCE_COMPILES will succeed but the built will fail.
+# We must test all flags here.
+# XXX actually, we can do this for all compilers, not only SunPro
+IF (CMAKE_CXX_COMPILER_ID MATCHES "SunPro" AND
+    CMAKE_GENERATOR MATCHES "Makefiles")
+  STRING(TOUPPER "CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE}" flags)
+  SET(CMAKE_REQUIRED_FLAGS "${${flags}}")
+ENDIF()
 CHECK_C_SOURCE_COMPILES("
-static inline int foo(){return 0;}
+extern int bar(int x);
+static inline int foo(){return bar(1);}
 int main(int argc, char *argv[]){return 0;}"
                             C_HAS_inline)
 IF(NOT C_HAS_inline)
   CHECK_C_SOURCE_COMPILES("
-  static __inline int foo(){return 0;}
+  extern int bar(int x);
+  static __inline int foo(){return bar(1);}
   int main(int argc, char *argv[]){return 0;}"
                             C_HAS___inline)
-  SET(C_INLINE __inline)
+  IF(C_HAS___inline)
+    SET(C_INLINE __inline)
+  ElSE()
+    SET(C_INLINE)
+    MESSAGE(WARNING "C compiler does not support funcion inlining")
+    IF(NOT NOINLINE)
+      MESSAGE(FATAL_ERROR "Use -DNOINLINE=TRUE to allow compilation without inlining")
+    ENDIF()
+  ENDIF()
 ENDIF()
 
 IF(NOT CMAKE_CROSSCOMPILING AND NOT MSVC)
@@ -1056,3 +1076,8 @@ CHECK_STRUCT_HAS_MEMBER("struct dirent" d_ino "dirent.h"  STRUCT_DIRENT_HAS_D_IN
 CHECK_STRUCT_HAS_MEMBER("struct dirent" d_namlen "dirent.h"  STRUCT_DIRENT_HAS_D_NAMLEN)
 SET(SPRINTF_RETURNS_INT 1)
 CHECK_INCLUDE_FILE(ucontext.h HAVE_UCONTEXT_H)
+IF(NOT HAVE_UCONTEXT_H)
+  CHECK_INCLUDE_FILE(sys/ucontext.h HAVE_UCONTEXT_H)
+ENDIF()
+CHECK_STRUCT_HAS_MEMBER("struct timespec" tv_sec "time.h" STRUCT_TIMESPEC_HAS_TV_SEC)
+CHECK_STRUCT_HAS_MEMBER("struct timespec" tv_nsec "time.h" STRUCT_TIMESPEC_HAS_TV_NSEC)

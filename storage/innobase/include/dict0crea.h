@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2014, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -110,6 +110,17 @@ UNIV_INTERN
 dberr_t
 dict_create_or_check_foreign_constraint_tables(void);
 /*================================================*/
+
+/********************************************************************//**
+Construct foreign key constraint defintion from data dictionary information.
+*/
+UNIV_INTERN
+char*
+dict_foreign_def_get(
+/*=================*/
+	dict_foreign_t*	foreign,/*!< in: foreign */
+	trx_t*		trx);	/*!< in: trx */
+
 /********************************************************************//**
 Generate a foreign key constraint name when it was not named by the user.
 A generated constraint has a name of the format dbname/tablename_ibfk_NUMBER,
@@ -123,7 +134,7 @@ dict_create_add_foreign_id(
 				incremented if used */
 	const char*	name,	/*!< in: table name */
 	dict_foreign_t*	foreign)/*!< in/out: foreign key */
-	__attribute__((nonnull));
+	MY_ATTRIBUTE((nonnull));
 
 /** Adds the given set of foreign key objects to the dictionary tables
 in the database. This function does not modify the dictionary cache. The
@@ -142,7 +153,7 @@ dict_create_add_foreigns_to_dictionary(
 	const dict_foreign_set&	local_fk_set,
 	const dict_table_t*	table,
 	trx_t*			trx)
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((nonnull, warn_unused_result));
 /****************************************************************//**
 Creates the tablespaces and datafiles system tables inside InnoDB
 at server bootstrap or server start if they are not found or are
@@ -174,10 +185,21 @@ UNIV_INTERN
 dberr_t
 dict_create_add_foreign_to_dictionary(
 /*==================================*/
+	dict_table_t*		table,	/*!< in: table */
 	const char*		name,	/*!< in: table name */
 	const dict_foreign_t*	foreign,/*!< in: foreign key */
 	trx_t*			trx)	/*!< in/out: dictionary transaction */
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((nonnull, warn_unused_result));
+
+/********************************************************************//**
+Construct foreign key constraint defintion from data dictionary information.
+*/
+UNIV_INTERN
+char*
+dict_foreign_def_get(
+/*=================*/
+	dict_foreign_t*	foreign,/*!< in: foreign */
+	trx_t*		trx);	/*!< in: trx */
 
 /* Table create node structure */
 struct tab_node_t{

@@ -1,7 +1,8 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2015, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
+Copyright (c) 2015, 2016, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -137,7 +138,7 @@ allows InnoDB to update_create_info() accordingly. */
 			+ DICT_TF_WIDTH_DATA_DIR)
 
 /** A mask of all the known/used bits in table flags */
-#define DICT_TF_BIT_MASK	(~(~0 << DICT_TF_BITS))
+#define DICT_TF_BIT_MASK	(~(~0U << DICT_TF_BITS))
 
 /** Zero relative shift position of the COMPACT field */
 #define DICT_TF_POS_COMPACT		0
@@ -156,19 +157,19 @@ allows InnoDB to update_create_info() accordingly. */
 
 /** Bit mask of the COMPACT field */
 #define DICT_TF_MASK_COMPACT				\
-		((~(~0 << DICT_TF_WIDTH_COMPACT))	\
+		((~(~0U << DICT_TF_WIDTH_COMPACT))	\
 		<< DICT_TF_POS_COMPACT)
 /** Bit mask of the ZIP_SSIZE field */
 #define DICT_TF_MASK_ZIP_SSIZE				\
-		((~(~0 << DICT_TF_WIDTH_ZIP_SSIZE))	\
+		((~(~0U << DICT_TF_WIDTH_ZIP_SSIZE))	\
 		<< DICT_TF_POS_ZIP_SSIZE)
 /** Bit mask of the ATOMIC_BLOBS field */
 #define DICT_TF_MASK_ATOMIC_BLOBS			\
-		((~(~0 << DICT_TF_WIDTH_ATOMIC_BLOBS))	\
+		((~(~0U << DICT_TF_WIDTH_ATOMIC_BLOBS))	\
 		<< DICT_TF_POS_ATOMIC_BLOBS)
 /** Bit mask of the DATA_DIR field */
 #define DICT_TF_MASK_DATA_DIR				\
-		((~(~0 << DICT_TF_WIDTH_DATA_DIR))	\
+		((~(~0U << DICT_TF_WIDTH_DATA_DIR))	\
 		<< DICT_TF_POS_DATA_DIR)
 
 /** Return the value of the COMPACT field */
@@ -183,7 +184,7 @@ allows InnoDB to update_create_info() accordingly. */
 #define DICT_TF_HAS_ATOMIC_BLOBS(flags)			\
 		((flags & DICT_TF_MASK_ATOMIC_BLOBS)	\
 		>> DICT_TF_POS_ATOMIC_BLOBS)
-/** Return the value of the ATOMIC_BLOBS field */
+/** Return the value of the DATA_DIR field */
 #define DICT_TF_HAS_DATA_DIR(flags)			\
 		((flags & DICT_TF_MASK_DATA_DIR)	\
 		>> DICT_TF_POS_DATA_DIR)
@@ -204,7 +205,7 @@ for unknown bits in order to protect backward incompatibility. */
 /* @{ */
 /** Total number of bits in table->flags2. */
 #define DICT_TF2_BITS			7
-#define DICT_TF2_BIT_MASK		~(~0 << DICT_TF2_BITS)
+#define DICT_TF2_BIT_MASK		~(~0U << DICT_TF2_BITS)
 
 /** TEMPORARY; TRUE for tables from CREATE TEMPORARY TABLE. */
 #define DICT_TF2_TEMPORARY		1
@@ -292,7 +293,7 @@ dict_mem_table_add_col(
 	ulint		mtype,	/*!< in: main datatype */
 	ulint		prtype,	/*!< in: precise type */
 	ulint		len)	/*!< in: precision */
-	__attribute__((nonnull(1)));
+	MY_ATTRIBUTE((nonnull(1)));
 /**********************************************************************//**
 Renames a column of a table in the data dictionary cache. */
 UNIV_INTERN
@@ -303,7 +304,7 @@ dict_mem_table_col_rename(
 	unsigned	nth_col,/*!< in: column index */
 	const char*	from,	/*!< in: old column name */
 	const char*	to)	/*!< in: new column name */
-	__attribute__((nonnull));
+	MY_ATTRIBUTE((nonnull));
 /**********************************************************************//**
 This function populates a dict_col_t memory structure with
 supplied information. */
@@ -914,6 +915,18 @@ if table->memcached_sync_count == DICT_TABLE_IN_DDL means there's DDL running on
 the table, DML from memcached will be blocked. */
 #define DICT_TABLE_IN_DDL -1
 
+/** These are used when MySQL FRM and InnoDB data dictionary are
+in inconsistent state. */
+typedef enum {
+	DICT_FRM_CONSISTENT = 0,	/*!< Consistent state */
+	DICT_FRM_NO_PK = 1,		/*!< MySQL has no primary key
+					but InnoDB dictionary has
+					non-generated one. */
+	DICT_NO_PK_FRM_HAS = 2,		/*!< MySQL has primary key but
+					InnoDB dictionary has not. */
+	DICT_FRM_INCONSISTENT_KEYS = 3	/*!< Key count mismatch */
+} dict_frm_t;
+
 /** Data structure for a database table.  Most fields will be
 initialized to 0, NULL or FALSE in dict_mem_table_create(). */
 struct dict_table_t{
@@ -972,6 +985,10 @@ struct dict_table_t{
 				/*!< True if the table belongs to a system
 				database (mysql, information_schema or
 				performance_schema) */
+	dict_frm_t	dict_frm_mismatch;
+				/*!< !DICT_FRM_CONSISTENT==0 if data
+				dictionary information and
+				MySQL FRM information mismatch. */
 #ifndef UNIV_HOTBACKUP
 	hash_node_t	name_hash; /*!< hash chain node */
 	hash_node_t	id_hash; /*!< hash chain node */

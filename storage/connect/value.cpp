@@ -1,7 +1,7 @@
 /************* Value C++ Functions Source Code File (.CPP) *************/
-/*  Name: VALUE.CPP  Version 2.5                                       */
+/*  Name: VALUE.CPP  Version 2.6                                       */
 /*                                                                     */
-/*  (C) Copyright to the author Olivier BERTRAND          2001-2015    */
+/*  (C) Copyright to the author Olivier BERTRAND          2001-2016    */
 /*                                                                     */
 /*  This file contains the VALUE and derived classes family functions. */
 /*  These classes contain values of different types. They are used so  */
@@ -103,6 +103,7 @@ ulonglong CharToNumber(char *p, int n, ulonglong maxval,
 
   if (minus) *minus = false;
   if (rc) *rc = false;
+	if (n <= 0) return 0LL;
 
   // Eliminate leading blanks or 0
   for (p2 = p + n; p < p2 && (*p == ' ' || *p == '0'); p++) ;
@@ -339,7 +340,7 @@ PVAL AllocateValue(PGLOBAL g, void *value, short type, short prec)
 
   switch (type) {
     case TYPE_STRING:
-      valp = new(g) TYPVAL<PSZ>((PSZ)value);
+      valp = new(g) TYPVAL<PSZ>((PSZ)value, prec);
       break;
     case TYPE_SHORT:
       valp = new(g) TYPVAL<short>(*(short*)value, TYPE_SHORT);
@@ -705,7 +706,7 @@ bool TYPVAL<TYPE>::SetValue_char(char *p, int n)
 template <>
 bool TYPVAL<double>::SetValue_char(char *p, int n)
   {
-  if (p) {
+  if (p && n > 0) {
     char buf[64];
 
     for (; n > 0 && *p == ' '; p++)
@@ -791,19 +792,29 @@ uchar TYPVAL<uchar>::GetTypedValue(PVBLK blk, int n)
 
 /***********************************************************************/
 /*  TYPVAL SetBinValue: with bytes extracted from a line.              */
+/*  Currently only used reading column of binary files.                */
 /***********************************************************************/
 template <class TYPE>
 void TYPVAL<TYPE>::SetBinValue(void *p)
-  {
-  Tval = *(TYPE *)p;
-  Null = false;
-  } // end of SetBinValue
+{
+#if defined(UNALIGNED_OK)
+	// x86 can cast non-aligned memory directly
+	Tval = *(TYPE *)p;
+#else
+	// Prevent unaligned memory access on MIPS and ArmHF platforms.
+	// Make use of memcpy instead of straight pointer dereferencing.
+	// Currently only used by WriteColumn of binary files.
+	// From original author: Vicentiu Ciorbaru <vicentiu@mariadb.org>
+	memcpy(&Tval, p, sizeof(TYPE));
+#endif
+	Null = false;
+} // end of SetBinValue
 
 /***********************************************************************/
 /*  GetBinValue: fill a buffer with the internal binary value.         */
 /*  This function checks whether the buffer length is enough and       */
 /*  returns true if not. Actual filling occurs only if go is true.     */
-/*  Currently used by WriteColumn of binary files.                     */
+/*  Currently only used writing column of binary files.                */
 /***********************************************************************/
 template <class TYPE>
 bool TYPVAL<TYPE>::GetBinValue(void *buf, int buflen, bool go)
@@ -818,7 +829,16 @@ bool TYPVAL<TYPE>::GetBinValue(void *buf, int buflen, bool go)
 //#endif
 
   if (go)
-    *(TYPE *)buf = Tval;
+#if defined(UNALIGNED_OK)
+		// x86 can cast non-aligned memory directly
+		*(TYPE *)buf = Tval;
+#else
+		// Prevent unaligned memory access on MIPS and ArmHF platforms.
+		// Make use of memcpy instead of straight pointer dereferencing.
+		// Currently only used by WriteColumn of binary files.
+		// From original author: Vicentiu Ciorbaru <vicentiu@mariadb.org>
+		memcpy(buf, &Tval, sizeof(TYPE));
+#endif
 
   Null = false;
   return false;
@@ -988,7 +1008,7 @@ uchar TYPVAL<uchar>::MinMaxVal(bool b)
   {return (b) ? UINT_MAX8 : 0;}
 
 /***********************************************************************/
-/*  SafeAdd: adds a value and test whether overflow/underflow occured. */
+/*  SafeAdd: adds a value and test whether overflow/underflow occurred. */
 /***********************************************************************/
 template <class TYPE>
 TYPE TYPVAL<TYPE>::SafeAdd(TYPE n1, TYPE n2)
@@ -1016,7 +1036,7 @@ inline double TYPVAL<double>::SafeAdd(double n1, double n2)
   } // end of SafeAdd
 
 /***********************************************************************/
-/*  SafeMult: multiply values and test whether overflow occured.       */
+/*  SafeMult: multiply values and test whether overflow occurred.       */
 /***********************************************************************/
 template <class TYPE>
 TYPE TYPVAL<TYPE>::SafeMult(TYPE n1, TYPE n2)
@@ -1208,12 +1228,12 @@ void TYPVAL<TYPE>::Print(PGLOBAL g, char *ps, uint z)
 /***********************************************************************/
 /*  STRING  public constructor from a constant string.                 */
 /***********************************************************************/
-TYPVAL<PSZ>::TYPVAL(PSZ s) : VALUE(TYPE_STRING)
+TYPVAL<PSZ>::TYPVAL(PSZ s, short c) : VALUE(TYPE_STRING)
   {
   Strp = s;
   Len = strlen(s);
   Clen = Len;
-  Ci = false;
+  Ci = (c == 1);
   } // end of STRING constructor
 
 /***********************************************************************/
@@ -1343,10 +1363,13 @@ bool TYPVAL<PSZ>::SetValue_pval(PVAL valp, bool chktype)
 /***********************************************************************/
 bool TYPVAL<PSZ>::SetValue_char(char *p, int n)
   {
-  bool rc;
+  bool rc = false;
 
-  if (p) {
-    rc = n > Len;
+  if (!p || n == 0) {
+		Reset();
+		Null = Nullable;
+	} else if (p != Strp) {
+		rc = n > Len;
 
     if ((n = MY_MIN(n, Len))) {
     	strncpy(Strp, p, n);
@@ -1365,10 +1388,6 @@ bool TYPVAL<PSZ>::SetValue_char(char *p, int n)
       Reset();
 
     Null = false;
-  } else {
-    rc = false;
-    Reset();
-    Null = Nullable;
   } // endif p
 
   return rc;
@@ -1379,12 +1398,12 @@ bool TYPVAL<PSZ>::SetValue_char(char *p, int n)
 /***********************************************************************/
 void TYPVAL<PSZ>::SetValue_psz(PSZ s)
   {
-  if (s) {
-    strncpy(Strp, s, Len);
+  if (!s) {
+		Reset();
+		Null = Nullable;
+	} else if (s != Strp) {
+		strncpy(Strp, s, Len);
     Null = false;
-  } else {
-    Reset();
-    Null = Nullable;
   } // endif s
 
   } // end of SetValue_psz
@@ -1642,7 +1661,7 @@ bool TYPVAL<PSZ>::Compute(PGLOBAL g, PVAL *vp, int np, OPVAL op)
       assert(np == 1 || np == 2);
 
       if (np == 2)
-        strncpy(Strp, p[0], Len);
+				SetValue_psz(p[0]);
 
       if ((i = Len - (signed)strlen(Strp)) > 0)
         strncat(Strp, p[np - 1], i);
@@ -1650,11 +1669,11 @@ bool TYPVAL<PSZ>::Compute(PGLOBAL g, PVAL *vp, int np, OPVAL op)
       break;
     case OP_MIN:
       assert(np == 2);
-      strcpy(Strp, (strcmp(p[0], p[1]) < 0) ? p[0] : p[1]);
+			SetValue_psz((strcmp(p[0], p[1]) < 0) ? p[0] : p[1]);
       break;
     case OP_MAX:
       assert(np == 2);
-      strcpy(Strp, (strcmp(p[0], p[1]) > 0) ? p[0] : p[1]);
+			SetValue_psz((strcmp(p[0], p[1]) > 0) ? p[0] : p[1]);
       break;
     default:
 //    sprintf(g->Message, MSG(BAD_EXP_OPER), op);
@@ -1804,7 +1823,7 @@ bool DECVAL::SetValue_char(char *p, int n)
   {
   bool rc;
 
-  if (p) {
+  if (p && n > 0) {
     rc = n > Len;
 
     if ((n = MY_MIN(n, Len))) {
@@ -2095,7 +2114,7 @@ bool BINVAL::SetValue_char(char *p, int n)
   {
   bool rc;
 
-  if (p) {
+  if (p && n > 0) {
     rc = n > Clen;
     Len = MY_MIN(n, Clen);
     memcpy(Binp, p, Len);
@@ -2665,20 +2684,23 @@ bool DTVAL::SetValue_pval(PVAL valp, bool chktype)
 /***********************************************************************/
 bool DTVAL::SetValue_char(char *p, int n)
   {
-  bool rc;
+  bool rc= 0;
 
   if (Pdtp) {
     char *p2;
     int   ndv;
     int  dval[6];
 
-    // Trim trailing blanks
-    for (p2 = p + n -1; p < p2 && *p2 == ' '; p2--) ;
+		if (n > 0) {
+			// Trim trailing blanks
+			for (p2 = p + n -1; p < p2 && *p2 == ' '; p2--);
 
-    if ((rc = (n = p2 - p + 1) > Len))
-      n = Len;
+			if ((rc = (n = p2 - p + 1) > Len))
+				n = Len;
 
-    memcpy(Sdate, p, n);
+			memcpy(Sdate, p, n);
+			} // endif n
+
     Sdate[n] = '\0';
 
     ndv = ExtractDate(Sdate, Pdtp, DefYear, dval);

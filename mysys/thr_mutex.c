@@ -34,9 +34,6 @@
 #include <m_string.h>
 #include <hash.h>
 
-#include <execinfo.h>
-#include <syslog.h>
-
 #ifndef DO_NOT_REMOVE_THREAD_WRAPPERS
 /* Remove wrappers */
 #undef pthread_mutex_t
@@ -95,61 +92,14 @@ __attribute__((noinline)) void my_reserve_slot(){
     return;
 }
 
-void create_core_dump_lvedebug_info(){
+__attribute__((noinline)) void lve_critical_section_begin(){
     return;
 }
-void release_thread_chanks_lvedebug_info(){
+
+__attribute__((noinline)) void lve_critical_section_end(){
     return;
 }
-void make_snapshot_lvedebug_info(long number_of_in, long numbers_of_out,
-	int real_lve, void *mysql_lve_mutex_governor_ptr_n, char *fname,
-	void *mtx){
-    (void)(number_of_in);
-    (void)(numbers_of_out);
-    (void)(real_lve);
-    (void)(mysql_lve_mutex_governor_ptr_n);
-    (void)(fname);
-    (void)(mtx);
-    return;
-}
-void init_data_lvedebug_info(char *sql, char *user_name){
-    (void)(sql);
-    (void)(user_name);
-    return;
-}
-void free_lvedebug_info(){
-    return;
-}
-int initialize_lvedebug_info(){
-    return 0;
-}
 
-int send_to_client_debug_data_lvedebug_info(char *buffer, int max_size) {
-	(void)(buffer);
-	(void)(max_size);
-	return 0;
-}
-
-long get_memusage_lvedebug_info() {
-	return 0;
-}
-
-void *init_info_retarray_lvedbug_info(int size){
-	(void)(size);
-	return NULL;
-}
-
-void release_info_retarray_lvedbug_info(void *ptr){
-	(void)(ptr);
-}
-
-void retinfo_info_retarray_lvedbug_info(char *buffer, int field, void *data, int index, int buf_len){
-	(void)(buffer);
-	(void)(field);
-	(void)(data);
-	(void)(index);
-	(void)(buf_len);
-}
 
 static pthread_mutex_t THR_LOCK_mutex;
 static ulong safe_mutex_count= 0;		/* Number of mutexes created */
@@ -1040,6 +990,7 @@ typedef struct __mysql_mutex {
        int is_in_lve; //
        int is_in_mutex; //mutex_lock count
        int put_in_lve; //
+       int critical;
        int was_in_lve; //
 } mysql_mutex;
 
@@ -1048,617 +999,6 @@ static HASH *mysql_lve_mutex_governor = NULL;
 __thread mysql_mutex *mysql_lve_mutex_governor_ptr = 0;
 
 pthread_mutex_t mtx_mysql_lve_mutex_governor_ptr = PTHREAD_MUTEX_INITIALIZER;
-
-//Insert debug part begin
-#define LVEMUTEX_USER_MAXSIZE 64
-#define LVEMUTEX_SQL_MAXSIZE 2048
-#define LVEMUTEX_OUT_MAXSIZE 4000
-#define LVEMUTEX_OUT_LOG_NAME "debug_info.log"
-#define LVEMUTEX_OUT_CONF_NAME "/etc/my.debug.conf"
-#define LVEMUTEX_OUT_CORE_NAME "debug_core_file"
-
-typedef long atomic_long;
-
-typedef struct __mysql_mutex_info_runtime_out {
-	char chunk_to_out[LVEMUTEX_OUT_MAXSIZE];
-	long size;
-	time_t tm;
-	struct __mysql_mutex_info_runtime_out *next;
-} mysql_mutex_info_runtime_out;
-
-typedef struct __mysql_mutex_info_runtime {
-	pid_t init_therad_id;
-	char sql_req[LVEMUTEX_SQL_MAXSIZE];
-	char user_name[LVEMUTEX_USER_MAXSIZE];
-	long number_of_in;
-	long numbers_of_out;
-	long max_mutex_deap;
-	int init;
-	mysql_mutex_info_runtime_out *chunk_ptr;
-	mysql_mutex_info_runtime_out *chunk_ptr_tail;
-} mysql_mutex_info_runtime;
-
-typedef struct __mysql_online_statistic_lvedebug_info {
-	pid_t pid;
-	int is_in_lve;
-	int chk_is_in_lve;
-	char debug_info[LVEMUTEX_OUT_MAXSIZE];
-	char sql[LVEMUTEX_OUT_MAXSIZE];
-	pthread_mutex_t flag_m;
-	void *ptr;
-} mysql_online_statistic_lvedebug_info;
-
-typedef struct __mysql_online_statistic_lvedebug_info_list {
-	mysql_online_statistic_lvedebug_info *ptr;
-	long size;
-	struct __mysql_online_statistic_lvedebug_info_list *next;
-	struct __mysql_online_statistic_lvedebug_info_list *prev;
-} mysql_online_statistic_lvedebug_info_list;
-
-typedef struct __mysql_mutex_info {
-	int debug_level; //0 - disbaled, 1-just in memory, 2 - write to one file, 3 - write to separate files, 4 - write to syslog
-	char user_to_debug[LVEMUTEX_USER_MAXSIZE];
-	int use_check; //0 - no, 1 - yes(call is_in_lve for flag checking)
-	char path_to_save[LVEMUTEX_SQL_MAXSIZE]; //where files will be saved
-	FILE *log_fd; //one file mode descriptor
-	pid_t pid; //parent pid
-	void *core;
-	int (*WriteCoreDump)(const char *);
-	int frame_deep;
-	long max_mem;
-	atomic_long current_usage;
-	pthread_mutex_t lock;
-	mysql_online_statistic_lvedebug_info_list *head;
-	mysql_online_statistic_lvedebug_info_list *tail;
-} mysql_mutex_info;
-
-typedef struct __mysql_online_statistic_lvedebug_info_ret {
-	pid_t pid;
-	int is_in_lve;
-	int chk_is_in_lve;
-	char debug_info[LVEMUTEX_OUT_MAXSIZE];
-	char sql[LVEMUTEX_OUT_MAXSIZE];
-} mysql_online_statistic_lvedebug_info_ret;
-
-static mysql_mutex_info lve_options_storage = { 0 };
-
-static pthread_mutex_t fd_mtx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t fd_dump = PTHREAD_MUTEX_INITIALIZER;
-static __thread mysql_mutex_info_runtime debug_info_storage = { 0 };
-static __thread mysql_online_statistic_lvedebug_info current_debug_info = { 0 };
-
-void *init_info_retarray_lvedbug_info(int size){
-	mysql_online_statistic_lvedebug_info_ret *ptr = calloc(size, sizeof(mysql_online_statistic_lvedebug_info_ret));
-	return (void *)ptr;
-}
-
-void release_info_retarray_lvedbug_info(void *ptr){
-	if(ptr) free(ptr);
-}
-
-void retinfo_info_retarray_lvedbug_info(char *buffer, int field, void *data, int index, int buf_len){
-	mysql_online_statistic_lvedebug_info_ret *ptr = (mysql_online_statistic_lvedebug_info_ret *)data;
-	if(ptr){
-		ptr += index;
-		switch(field){
-		case 0:
-			snprintf(buffer, buf_len, "%d", ptr->pid);
-			break;
-		case 1:
-			snprintf(buffer, buf_len, "%d", ptr->is_in_lve);
-			break;
-		case 2:
-			snprintf(buffer, buf_len, "%d", ptr->chk_is_in_lve);
-			break;
-		case 3:
-			snprintf(buffer, buf_len, "%s", ptr->sql);
-			break;
-		case 4:
-			snprintf(buffer, buf_len, "%s", ptr->debug_info);
-			break;
-		}
-	}
-
-}
-
-static void *try_to_calloc_lvedebug_info(size_t __nmemb, size_t __size) {
-	void *result_ptr = NULL;
-	long tmp_size = __nmemb * __size;
-	if (__sync_sub_and_fetch(&lve_options_storage.current_usage, 0) >= 0) {
-		result_ptr = calloc(__nmemb, __size);
-		if (result_ptr) {
-			__sync_sub_and_fetch(&lve_options_storage.current_usage, tmp_size);
-			((mysql_mutex_info_runtime_out *) result_ptr)->size = (__nmemb
-					* __size);
-		}
-	}
-	return result_ptr;
-}
-
-static void try_to_free_lvedebug_info(void *ptr) {
-	mysql_mutex_info_runtime_out *ptr_tmp =
-			(mysql_mutex_info_runtime_out *) ptr;
-	if(ptr_tmp){
-		__sync_add_and_fetch(&lve_options_storage.current_usage, ptr_tmp->size);
-		free(ptr_tmp);
-	}
-}
-
-static void *try_to_calloc_lvedebug_info_(size_t __nmemb, size_t __size) {
-	void *result_ptr = NULL;
-	long tmp_size = __nmemb * __size;
-	if (__sync_sub_and_fetch(&lve_options_storage.current_usage, 0) >= 0) {
-		result_ptr = calloc(__nmemb, __size);
-		if (result_ptr) {
-			__sync_sub_and_fetch(&lve_options_storage.current_usage, tmp_size);
-			((mysql_online_statistic_lvedebug_info_list *) result_ptr)->size
-					= (__nmemb * __size);
-		}
-	}
-	return result_ptr;
-}
-
-static void try_to_free_lvedebug_info_(void *ptr) {
-	mysql_online_statistic_lvedebug_info_list *ptr_tmp =
-			(mysql_online_statistic_lvedebug_info_list *) ptr;
-	if(ptr_tmp){
-		__sync_add_and_fetch(&lve_options_storage.current_usage, ptr_tmp->size);
-		free(ptr_tmp);
-	}
-}
-
-static void read_config_lvedebug_info() {
-	char read_buff[LVEMUTEX_SQL_MAXSIZE] = { 0 };
-	FILE *fp = fopen(LVEMUTEX_OUT_CONF_NAME, "r");
-	if (fp) {
-		while (fgets(read_buff, LVEMUTEX_SQL_MAXSIZE, fp) != NULL) {
-			if (read_buff[strnlen(read_buff, LVEMUTEX_SQL_MAXSIZE) - 1] == 0xA) {
-				read_buff[strnlen(read_buff, LVEMUTEX_SQL_MAXSIZE) - 1] = 0;
-			}
-			if (strstr(read_buff, "debug_level")) {
-				char *ptr = strchr(read_buff, '=');
-				if (ptr) {
-					ptr++;
-					lve_options_storage.debug_level = atoi(ptr);
-				}
-			}
-			if (strstr(read_buff, "user_to_debug")) {
-				char *ptr = strchr(read_buff, '=');
-				if (ptr) {
-					ptr++;
-					strncpy(lve_options_storage.user_to_debug, ptr, LVEMUTEX_USER_MAXSIZE-1);
-				}
-			}
-			if (strstr(read_buff, "path_to_save")) {
-				char *ptr = strchr(read_buff, '=');
-				if (ptr) {
-					ptr++;
-					strncpy(lve_options_storage.path_to_save, ptr, LVEMUTEX_SQL_MAXSIZE-1);
-				}
-			}
-			if (strstr(read_buff, "use_check")) {
-				char *ptr = strchr(read_buff, '=');
-				if (ptr) {
-					ptr++;
-					lve_options_storage.use_check = atoi(ptr);
-				}
-			}
-			if (strstr(read_buff, "frame_deep")) {
-				char *ptr = strchr(read_buff, '=');
-				if (ptr) {
-					ptr++;
-					lve_options_storage.frame_deep = atoi(ptr);
-				}
-			}
-			if (strstr(read_buff, "max_memory")) {
-				char *ptr = strchr(read_buff, '=');
-				if (ptr) {
-					ptr++;
-					lve_options_storage.max_mem = atol(ptr);
-				}
-			}
-		}
-		fclose(fp);
-	}
-}
-
-static pid_t gettid_lvedebug_info(void) {
-	return syscall(__NR_gettid);
-}
-
-int initialize_lvedebug_info() {
-	int error_res = 0;
-	char file_path_buffer[LVEMUTEX_OUT_MAXSIZE];
-	memset(&lve_options_storage, (int) 0, sizeof(mysql_mutex_info));
-	strcpy(lve_options_storage.path_to_save, "/tmp");
-	lve_options_storage.frame_deep = 10;
-	lve_options_storage.max_mem = 100 * 1024 * 1024;
-	lve_options_storage.current_usage = lve_options_storage.max_mem;
-	read_config_lvedebug_info();
-	pthread_mutex_lock(&fd_mtx);
-	if (lve_options_storage.debug_level && !lve_options_storage.log_fd) {
-		lve_options_storage.pid = getpid();
-		snprintf(file_path_buffer, LVEMUTEX_OUT_MAXSIZE, "%s/%s.%d",
-				lve_options_storage.path_to_save, LVEMUTEX_OUT_LOG_NAME,
-				lve_options_storage.pid);
-		lve_options_storage.log_fd = fopen(file_path_buffer, "a");
-		if (lve_options_storage.log_fd == NULL) {
-			lve_options_storage.debug_level = 0;
-			error_res = 1;
-		}
-		lve_options_storage.core = dlopen("libcoredumper.so.1",
-				RTLD_LOCAL | RTLD_LAZY);
-		if (lve_options_storage.core) {
-			lve_options_storage.WriteCoreDump = dlsym(lve_options_storage.core,
-					"WriteCoreDump");
-			if (!lve_options_storage.WriteCoreDump) {
-				dlclose(lve_options_storage.core);
-				lve_options_storage.core = NULL;
-			}
-		}
-	}
-	pthread_mutex_unlock(&fd_mtx);
-	if (error_res)
-		return -1;
-	else
-		return 0;
-}
-
-static void release_current_info_lvedebug_info() {
-	pthread_mutex_lock(&lve_options_storage.lock);
-	if (lve_options_storage.head) {
-		mysql_online_statistic_lvedebug_info_list *ptr =
-				lve_options_storage.head;
-		while (ptr) {
-			mysql_online_statistic_lvedebug_info_list *ptr_tmp = ptr;
-			ptr = ptr->next;
-			try_to_free_lvedebug_info_(ptr_tmp);
-		}
-		lve_options_storage.head = NULL;
-		lve_options_storage.tail = NULL;
-	}
-	pthread_mutex_unlock(&lve_options_storage.lock);
-}
-
-void free_lvedebug_info() {
-	if (lve_options_storage.debug_level) {
-		pthread_mutex_lock(&fd_mtx);
-		if (lve_options_storage.log_fd) {
-			fflush(lve_options_storage.log_fd);
-			fclose(lve_options_storage.log_fd);
-			lve_options_storage.pid = 0;
-			if (lve_options_storage.core) {
-				dlclose(lve_options_storage.core);
-				lve_options_storage.core = NULL;
-				lve_options_storage.WriteCoreDump = NULL;
-			}
-		}
-		pthread_mutex_unlock(&fd_mtx);
-		release_current_info_lvedebug_info();
-	}
-}
-
-static void set_current_info_lvedebug_info(int first, char *sql,
-		char *debug_info, int is_in_lve, int check_is_in_lve) {
-
-	if (first) {
-		pthread_mutex_lock(&current_debug_info.flag_m);
-		current_debug_info.chk_is_in_lve = check_is_in_lve;
-		current_debug_info.is_in_lve = is_in_lve;
-		current_debug_info.pid = gettid_lvedebug_info();
-		current_debug_info.ptr = NULL;
-		strncpy(current_debug_info.debug_info, debug_info,
-				sizeof(current_debug_info.debug_info)-1);
-		strncpy(current_debug_info.sql, sql, sizeof(current_debug_info.sql)-1);
-
-		mysql_online_statistic_lvedebug_info_list *ptr =
-				try_to_calloc_lvedebug_info_(1,
-						sizeof(mysql_online_statistic_lvedebug_info_list));
-		if (ptr) {
-			current_debug_info.ptr = ptr;
-			pthread_mutex_unlock(&current_debug_info.flag_m);
-			ptr->ptr = &current_debug_info;
-			pthread_mutex_lock(&lve_options_storage.lock);
-			if (!lve_options_storage.tail) {
-				lve_options_storage.tail = ptr;
-				lve_options_storage.head = ptr;
-			} else {
-				lve_options_storage.tail->next = ptr;
-				ptr->prev = lve_options_storage.tail;
-				lve_options_storage.tail = ptr;
-			}
-			pthread_mutex_unlock(&lve_options_storage.lock);
-		} else {
-			pthread_mutex_unlock(&current_debug_info.flag_m);
-		}
-
-	} else {
-		pthread_mutex_lock(&current_debug_info.flag_m);
-		current_debug_info.chk_is_in_lve = check_is_in_lve;
-		current_debug_info.is_in_lve = is_in_lve;
-		strncpy(current_debug_info.debug_info, debug_info,
-				sizeof(current_debug_info.debug_info)-1);
-		pthread_mutex_unlock(&current_debug_info.flag_m);
-	}
-
-}
-
-static void remove_current_info_lvedebug_info() {
-	if (current_debug_info.ptr) {
-		pthread_mutex_lock(&lve_options_storage.lock);
-		mysql_online_statistic_lvedebug_info_list
-				*i_ptr =
-						(mysql_online_statistic_lvedebug_info_list *) current_debug_info.ptr;
-		if (i_ptr->prev) {
-			i_ptr->prev->next = i_ptr->next;
-		} else {
-			lve_options_storage.head = i_ptr->next;
-		}
-		if (i_ptr->next) {
-			i_ptr->next->prev = i_ptr->prev;
-		} else {
-			lve_options_storage.tail = i_ptr->prev;
-		}
-		pthread_mutex_unlock(&lve_options_storage.lock);
-		try_to_free_lvedebug_info_(current_debug_info.ptr);
-		current_debug_info.ptr = NULL;
-	}
-}
-
-static int save_data_to_file_lvedebug_info(mysql_mutex_info_runtime_out *chanks) {
-	char path_to_save[LVEMUTEX_OUT_MAXSIZE] = { 0 };
-	char buffer[80];
-	FILE *i_fd = NULL;
-	if (chanks && (lve_options_storage.debug_level >= 2)) {
-		if (lve_options_storage.debug_level == 2) {
-			i_fd = lve_options_storage.log_fd;
-			pthread_mutex_lock(&fd_mtx);
-		} else if (lve_options_storage.debug_level == 4) {
-			i_fd = NULL;
-		} else {
-			snprintf(path_to_save, LVEMUTEX_OUT_MAXSIZE, "%s/%s.%d.%d",
-					lve_options_storage.path_to_save, LVEMUTEX_OUT_LOG_NAME,
-					lve_options_storage.pid, gettid_lvedebug_info());
-			i_fd = fopen(path_to_save, "a");
-			if (i_fd == NULL) {
-				return -1;
-			}
-		}
-
-		mysql_mutex_info_runtime_out *ptr = chanks;
-		while (ptr) {
-			if (i_fd == NULL) {
-				openlog ("mysqld_debug", LOG_PID | LOG_NDELAY, LOG_DAEMON);
-				syslog (LOG_DEBUG, ptr->chunk_to_out);
-
-				closelog ();
-			} else {
-				struct tm *info;
-				info = localtime(&ptr->tm);
-				strftime(buffer, 80, "%c", info);
-				fprintf(i_fd, "%s: %s\n", buffer, ptr->chunk_to_out);
-			}
-			ptr = ptr->next;
-		}
-
-		if (lve_options_storage.debug_level == 2) {
-			fflush(i_fd);
-			pthread_mutex_unlock(&fd_mtx);
-		} else if (lve_options_storage.debug_level == 4) {
-			i_fd = NULL;
-		} else {
-			fflush(i_fd);
-			fclose(i_fd);
-		}
-	}
-	return 0;
-}
-
-void init_data_lvedebug_info(char *sql, char *user_name) {
-	if (lve_options_storage.debug_level) {
-		memset(&debug_info_storage, 0, sizeof(debug_info_storage));
-		strncpy(debug_info_storage.sql_req, sql, LVEMUTEX_SQL_MAXSIZE-1);
-		strncpy(debug_info_storage.user_name, user_name, LVEMUTEX_USER_MAXSIZE-1);
-		set_current_info_lvedebug_info(1, debug_info_storage.sql_req, "INIT",
-				0, -1);
-	}
-}
-
-void create_core_dump_lvedebug_info() {
-	//Don't call in LVE
-	char path_to_save[LVEMUTEX_OUT_MAXSIZE] = { 0 };
-
-	snprintf(path_to_save, LVEMUTEX_OUT_MAXSIZE, "%s/%s.%d.%d",
-			lve_options_storage.path_to_save, LVEMUTEX_OUT_CORE_NAME,
-			lve_options_storage.pid, current_debug_info.pid);
-	if (lve_options_storage.WriteCoreDump) {
-		pthread_mutex_lock(&fd_dump);
-		(*lve_options_storage.WriteCoreDump)(path_to_save);
-		pthread_mutex_unlock(&fd_dump);
-	}
-}
-
-static void flush_data_lvedebug_info() {
-	if (debug_info_storage.chunk_ptr) {
-		save_data_to_file_lvedebug_info(debug_info_storage.chunk_ptr);
-	}
-	mysql_mutex_info_runtime_out *ptr = debug_info_storage.chunk_ptr;
-	while (ptr) {
-		mysql_mutex_info_runtime_out *ptr2 = ptr;
-		ptr = ptr->next;
-		try_to_free_lvedebug_info(ptr2);
-	}
-	debug_info_storage.chunk_ptr = NULL;
-	debug_info_storage.chunk_ptr_tail = NULL;
-}
-
-void make_snapshot_lvedebug_info(long number_of_in, long numbers_of_out,
-		int real_lve, void *mysql_lve_mutex_governor_ptr_n, char *fname,
-		void *mtx) {
-	int real_lve_i = -1;
-	(mysql_mutex *) (mysql_lve_mutex_governor_ptr_n);
-
-	if (mysql_lve_mutex_governor_ptr && lve_options_storage.debug_level) {
-		if (lve_options_storage.use_check) {
-			if (governor_is_in_lve) {
-				real_lve_i = governor_is_in_lve();
-			}
-		}
-
-		char snapshot_buf_ss[LVEMUTEX_OUT_MAXSIZE] = { 0 };
-		char snapshot_buf_ss2[LVEMUTEX_OUT_MAXSIZE] = { 0 };
-		debug_info_storage.number_of_in += number_of_in;
-		debug_info_storage.numbers_of_out += numbers_of_out;
-		if (debug_info_storage.max_mutex_deap
-				< mysql_lve_mutex_governor_ptr->is_in_mutex)
-			debug_info_storage.max_mutex_deap
-					= mysql_lve_mutex_governor_ptr->is_in_mutex;
-		void *array[10];
-		int size;
-		char **strings;
-		size_t i;
-		size = backtrace(array, lve_options_storage.frame_deep * 3);
-		strings = backtrace_symbols(array, size);
-		for (i = (((size - lve_options_storage.frame_deep) < 0) ? 0 : (size
-				- lve_options_storage.frame_deep)); i < size; i++) {
-			snprintf(snapshot_buf_ss2, LVEMUTEX_OUT_MAXSIZE-1, "%s # %s|",
-					snapshot_buf_ss, strings[i]);
-			strncpy(snapshot_buf_ss, snapshot_buf_ss2, LVEMUTEX_OUT_MAXSIZE-1);
-		}
-		free(strings);
-		set_current_info_lvedebug_info(0, "SQL", snapshot_buf_ss,
-				mysql_lve_mutex_governor_ptr->is_in_lve, real_lve_i);
-		if (!debug_info_storage.init) {
-			debug_info_storage.init = 1;
-
-			mysql_mutex_info_runtime_out *ptr = try_to_calloc_lvedebug_info(1,
-					sizeof(mysql_mutex_info_runtime_out));
-			if (ptr) {
-				ptr->tm = time(NULL);
-				snprintf(ptr->chunk_to_out, LVEMUTEX_OUT_MAXSIZE-1,
-						"%d %s SQL %s U:%s", gettid_lvedebug_info(), fname,
-						debug_info_storage.sql_req,
-						debug_info_storage.user_name);
-				if (debug_info_storage.chunk_ptr_tail) {
-					debug_info_storage.chunk_ptr_tail->next = ptr;
-					debug_info_storage.chunk_ptr_tail = ptr;
-				} else {
-					debug_info_storage.chunk_ptr = ptr;
-					debug_info_storage.chunk_ptr_tail = ptr;
-				}
-			}
-
-		}
-
-		if (lve_options_storage.debug_level > 1) {
-			mysql_mutex_info_runtime_out *ptr = try_to_calloc_lvedebug_info(1,
-					sizeof(mysql_mutex_info_runtime_out));
-			if (ptr) {
-				ptr->tm = time(NULL);
-				snprintf(
-						ptr->chunk_to_out,
-						LVEMUTEX_OUT_MAXSIZE,
-						"%d %s IN %ld OUT %ld MD %ld IILR %d FL %d PL %d M:%p %s",
-						gettid_lvedebug_info(), fname,
-						debug_info_storage.number_of_in,
-						debug_info_storage.numbers_of_out,
-						debug_info_storage.max_mutex_deap, real_lve_i,
-						mysql_lve_mutex_governor_ptr->is_in_lve,
-						mysql_lve_mutex_governor_ptr->put_in_lve, mtx,
-						snapshot_buf_ss);
-				if (debug_info_storage.chunk_ptr_tail) {
-					debug_info_storage.chunk_ptr_tail->next = ptr;
-					debug_info_storage.chunk_ptr_tail = ptr;
-				} else {
-					debug_info_storage.chunk_ptr = ptr;
-					debug_info_storage.chunk_ptr_tail = ptr;
-				}
-			}
-		}
-
-		if (real_lve && lve_options_storage.use_check) {
-			if (((real_lve_i == 1)
-					&& (mysql_lve_mutex_governor_ptr->is_in_lve != 1))
-					|| ((real_lve_i == 0)
-							&& (mysql_lve_mutex_governor_ptr->is_in_lve == 1))) {
-				flush_data_lvedebug_info();
-				create_core_dump_lvedebug_info();
-			}
-		}
-
-	}
-}
-
-void release_thread_chanks_lvedebug_info() {
-	if (lve_options_storage.debug_level) {
-		remove_current_info_lvedebug_info();
-		if (debug_info_storage.chunk_ptr) {
-			save_data_to_file_lvedebug_info(debug_info_storage.chunk_ptr);
-		}
-		mysql_mutex_info_runtime_out *ptr = debug_info_storage.chunk_ptr;
-		while (ptr) {
-			mysql_mutex_info_runtime_out *ptr2 = ptr;
-			ptr = ptr->next;
-			try_to_free_lvedebug_info(ptr2);
-		}
-		debug_info_storage.chunk_ptr = NULL;
-		debug_info_storage.chunk_ptr_tail = NULL;
-	}
-}
-
-static void get_core_lvedebug_info(void *mysql_lve_mutex_governor_ptr_n) {
-	int real_lve_i = -1;
-	mysql_mutex *mysql_lve_mutex_governor_ptr_i =
-			(mysql_mutex *) mysql_lve_mutex_governor_ptr_n;
-	if (mysql_lve_mutex_governor_ptr_i && lve_options_storage.debug_level) {
-		if (lve_options_storage.use_check) {
-			if (governor_is_in_lve) {
-				real_lve_i = governor_is_in_lve();
-			}
-			if (((real_lve_i == 1)
-					&& (mysql_lve_mutex_governor_ptr_i->is_in_lve != 1))
-					|| ((real_lve_i == 0)
-							&& (mysql_lve_mutex_governor_ptr_i->is_in_lve == 1))) {
-				create_core_dump_lvedebug_info();
-			}
-		}
-	}
-}
-
-int send_to_client_debug_data_lvedebug_info(void *buffer, int max_size) {
-	int counter = max_size;
-
-	mysql_online_statistic_lvedebug_info_ret *buffer_i = (mysql_online_statistic_lvedebug_info_ret *)buffer;
-	if(!buffer_i) return 0;
-	pthread_mutex_lock(&lve_options_storage.lock);
-	if (lve_options_storage.head) {
-		mysql_online_statistic_lvedebug_info_list *ptr =
-				lve_options_storage.head;
-		while (ptr) {
-			if (ptr->ptr) {
-				pthread_mutex_lock(&ptr->ptr->flag_m);
-				(*buffer_i).chk_is_in_lve = ptr->ptr->chk_is_in_lve;
-				(*buffer_i).is_in_lve = ptr->ptr->is_in_lve;
-				(*buffer_i).pid = ptr->ptr->pid;
-				strncpy((*buffer_i).sql, ptr->ptr->sql, LVEMUTEX_OUT_MAXSIZE-1);
-				strncpy((*buffer_i).debug_info, ptr->ptr->debug_info, LVEMUTEX_OUT_MAXSIZE-1);
-				pthread_mutex_unlock(&ptr->ptr->flag_m);
-				buffer_i++;
-				counter--;
-				if (counter == 0)
-					break;
-			}
-			ptr = ptr->next;
-		}
-	}
-	pthread_mutex_unlock(&lve_options_storage.lock);
-	return (max_size - counter);
-}
-
-long get_memusage_lvedebug_info() {
-	return __sync_add_and_fetch(&lve_options_storage.current_usage, 0);
-}
-//Insert debug part end
 
 void governor_value_destroyed(mysql_mutex *data) {
        free(data);
@@ -1793,12 +1133,10 @@ void governor_detroy_mysql_thread_info() {
 __attribute__((noinline)) int put_in_lve(char *user) {
        if (governor_add_mysql_thread_info()<0) return -1;
        if (mysql_lve_mutex_governor_ptr) {
-	       make_snapshot_lvedebug_info(0, 0, 0, mysql_lve_mutex_governor_ptr, "put_in_lve(before)", NULL);
                if (!governor_enter_lve(&lve_cookie, user)) {
                        mysql_lve_mutex_governor_ptr->is_in_lve = 1;
                }
                mysql_lve_mutex_governor_ptr->is_in_mutex = 0;
-	       make_snapshot_lvedebug_info(0, 0, 0, mysql_lve_mutex_governor_ptr, "put_in_lve", NULL);
        }
 	
        return 0;
@@ -1807,27 +1145,21 @@ __attribute__((noinline)) int put_in_lve(char *user) {
 __attribute__((noinline)) void lve_thr_exit() {
        if (mysql_lve_mutex_governor_ptr && mysql_lve_mutex_governor_ptr->is_in_lve
                       == 1) {
-	       get_core_lvedebug_info(mysql_lve_mutex_governor_ptr);
-	       make_snapshot_lvedebug_info(0, 0, 0, mysql_lve_mutex_governor_ptr, "lve_thr_exit(pre exit)", NULL);
                governor_lve_exit(&lve_cookie);
                mysql_lve_mutex_governor_ptr->is_in_lve = 0;
-	       make_snapshot_lvedebug_info(0, 0, 0, mysql_lve_mutex_governor_ptr, "lve_thr_exit", NULL);
        }
-       release_thread_chanks_lvedebug_info();
        governor_remove_mysql_thread_info();
 }
 
 __attribute__((noinline)) int my_pthread_lvemutex_lock(my_pthread_fastmutex_t *mp) {
        if (mysql_lve_mutex_governor_ptr) {
                if (mysql_lve_mutex_governor_ptr->is_in_lve == 1) {
-		       get_core_lvedebug_info(mysql_lve_mutex_governor_ptr);
-                       governor_lve_exit(&lve_cookie);
+                       if(!mysql_lve_mutex_governor_ptr->critical) governor_lve_exit(&lve_cookie);
                        mysql_lve_mutex_governor_ptr->is_in_lve = 2;
                } else if (mysql_lve_mutex_governor_ptr->is_in_lve > 1) {
                        mysql_lve_mutex_governor_ptr->is_in_lve++;
                }
                mysql_lve_mutex_governor_ptr->is_in_mutex++;
-	       make_snapshot_lvedebug_info(1, 0, 0, mysql_lve_mutex_governor_ptr, "my_pthread_lvemutex_lock", (void *)&mp->mutex);
        }
        return my_pthread_fastmutex_lock(mp);
 }
@@ -1835,8 +1167,7 @@ __attribute__((noinline)) int my_pthread_lvemutex_lock(my_pthread_fastmutex_t *m
 __attribute__((noinline)) int my_pthread_lvemutex_trylock(pthread_mutex_t *mutex) {
        if (mysql_lve_mutex_governor_ptr) {
                if (mysql_lve_mutex_governor_ptr->is_in_lve == 1) {
-			get_core_lvedebug_info(mysql_lve_mutex_governor_ptr);
-                        governor_lve_exit(&lve_cookie);
+                        if(!mysql_lve_mutex_governor_ptr->critical) governor_lve_exit(&lve_cookie);
                }
        }
        int ret = pthread_mutex_trylock(mutex);
@@ -1850,14 +1181,15 @@ __attribute__((noinline)) int my_pthread_lvemutex_trylock(pthread_mutex_t *mutex
                 mysql_lve_mutex_governor_ptr->is_in_mutex++;
                } else {
                 if (mysql_lve_mutex_governor_ptr->is_in_lve == 1){
-                    if (!governor_enter_lve_light(&lve_cookie)) {
+                    if(mysql_lve_mutex_governor_ptr->critical){
+                           mysql_lve_mutex_governor_ptr->is_in_lve = 1;
+                    } else if (!governor_enter_lve_light(&lve_cookie)) {
                            mysql_lve_mutex_governor_ptr->is_in_lve = 1;
                     } else {
     			   mysql_lve_mutex_governor_ptr->is_in_lve = 0;
                     }
                 }
                }
-	     make_snapshot_lvedebug_info((ret != EBUSY)?1:0, 0, 0, mysql_lve_mutex_governor_ptr, (ret != EBUSY)?"my_pthread_lvemutex_trylock(success)":"my_pthread_lvemutex_trylock(unsuccess)", (void *)mutex);
        }
        return ret;
 }
@@ -1869,14 +1201,15 @@ __attribute__((noinline)) int my_pthread_lvemutex_unlock(
        if (mysql_lve_mutex_governor_ptr) {
                if ((mysql_lve_mutex_governor_ptr->is_in_lve == 2)
                                && governor_enter_lve_light) {
-		       if (!governor_enter_lve_light(&lve_cookie)) {
+                       if(mysql_lve_mutex_governor_ptr->critical) {
+                               mysql_lve_mutex_governor_ptr->is_in_lve = 1;
+                       } else if (!governor_enter_lve_light(&lve_cookie)) {
                                mysql_lve_mutex_governor_ptr->is_in_lve = 1;
                        }
                } else if (mysql_lve_mutex_governor_ptr->is_in_lve > 2) {
                        mysql_lve_mutex_governor_ptr->is_in_lve--;
                }
                mysql_lve_mutex_governor_ptr->is_in_mutex--;
-	       make_snapshot_lvedebug_info(0, 1, 0, mysql_lve_mutex_governor_ptr, "my_pthread_lvemutex_unlock", (void *)mutex);
        }
        return ret;
 }
@@ -1884,14 +1217,12 @@ __attribute__((noinline)) int my_pthread_lvemutex_unlock(
 __attribute__((noinline)) void my_reserve_slot() {
        if (mysql_lve_mutex_governor_ptr) {
                if (mysql_lve_mutex_governor_ptr->is_in_lve == 1) {
-		       get_core_lvedebug_info(mysql_lve_mutex_governor_ptr);
-                       governor_lve_exit(&lve_cookie);
+                       if(!mysql_lve_mutex_governor_ptr->critical) governor_lve_exit(&lve_cookie);
                        mysql_lve_mutex_governor_ptr->is_in_lve = 2;
                } else if (mysql_lve_mutex_governor_ptr->is_in_lve > 1) {
                        mysql_lve_mutex_governor_ptr->is_in_lve++;
                }
                mysql_lve_mutex_governor_ptr->is_in_mutex++;
-	       make_snapshot_lvedebug_info(0, 0, 0, mysql_lve_mutex_governor_ptr, "my_reserve_slot", NULL);
        }
        return;
 }
@@ -1900,17 +1231,41 @@ __attribute__((noinline)) void my_release_slot() {
        if (mysql_lve_mutex_governor_ptr) {
                if ((mysql_lve_mutex_governor_ptr->is_in_lve == 2)
                                && governor_enter_lve_light) {
-                        if (!governor_enter_lve_light(&lve_cookie)) {
+                        if(mysql_lve_mutex_governor_ptr->critical){
+                               mysql_lve_mutex_governor_ptr->is_in_lve = 1;
+                        } else if (!governor_enter_lve_light(&lve_cookie)) {
                                mysql_lve_mutex_governor_ptr->is_in_lve = 1;
                        }
                } else if (mysql_lve_mutex_governor_ptr->is_in_lve > 2) {
                        mysql_lve_mutex_governor_ptr->is_in_lve--;
                }
                mysql_lve_mutex_governor_ptr->is_in_mutex--;
-	       make_snapshot_lvedebug_info(0, 0, 0, mysql_lve_mutex_governor_ptr, "my_release_slot", NULL);
        }
        return;
 }
+
+__attribute__((noinline)) void lve_critical_section_begin() {
+      if (mysql_lve_mutex_governor && mysql_lve_mutex_governor_ptr) {
+            if(!mysql_lve_mutex_governor_ptr->critical)
+                  mysql_lve_mutex_governor_ptr->was_in_lve = mysql_lve_mutex_governor_ptr->is_in_lve;
+            mysql_lve_mutex_governor_ptr->critical++;
+      }
+}
+
+__attribute__((noinline)) void lve_critical_section_end() {
+      if (mysql_lve_mutex_governor && mysql_lve_mutex_governor_ptr) {
+            mysql_lve_mutex_governor_ptr->critical--;
+            if(mysql_lve_mutex_governor_ptr->critical<0) mysql_lve_mutex_governor_ptr->critical=0;
+            if(!mysql_lve_mutex_governor_ptr->critical && 
+               (mysql_lve_mutex_governor_ptr->was_in_lve>1) && 
+               (mysql_lve_mutex_governor_ptr->is_in_lve == 1) && governor_enter_lve_light){
+                  if (!governor_enter_lve_light(&lve_cookie)) {
+                        mysql_lve_mutex_governor_ptr->is_in_lve = 1;
+                  }
+            }
+      }
+}
+
 
 void fastmutex_global_init(void)
 {

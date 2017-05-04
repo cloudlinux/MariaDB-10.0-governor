@@ -1,6 +1,7 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2014, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2014, 2017, MariaDB Corporation. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -1301,6 +1302,28 @@ fil_space_free(
 
 /*******************************************************************//**
 Returns a pointer to the file_space_t that is in the memory cache
+associated with a space id.
+@return	file_space_t pointer, NULL if space not found */
+fil_space_t*
+fil_space_get(
+/*==========*/
+	ulint	id)	/*!< in: space id */
+{
+	fil_space_t*	space;
+
+	ut_ad(fil_system);
+
+	mutex_enter(&fil_system->mutex);
+
+	space = fil_space_get_by_id(id);
+
+	mutex_exit(&fil_system->mutex);
+
+	return (space);
+}
+
+/*******************************************************************//**
+Returns a pointer to the file_space_t that is in the memory cache
 associated with a space id. The caller must lock fil_system->mutex.
 @return	file_space_t pointer, NULL if space not found */
 UNIV_INLINE
@@ -1706,7 +1729,7 @@ fil_set_max_space_id_if_bigger(
 Writes the flushed lsn and the latest archived log number to the page header
 of the first page of a data file of the system tablespace (space 0),
 which is uncompressed. */
-static __attribute__((warn_unused_result))
+static MY_ATTRIBUTE((warn_unused_result))
 dberr_t
 fil_write_lsn_and_arch_no_to_file(
 /*==============================*/
@@ -1714,7 +1737,7 @@ fil_write_lsn_and_arch_no_to_file(
 	ulint	sum_of_sizes,	/*!< in: combined size of previous files
 				in space, in database pages */
 	lsn_t	lsn,		/*!< in: lsn to write */
-	ulint	arch_log_no __attribute__((unused)))
+	ulint	arch_log_no MY_ATTRIBUTE((unused)))
 				/*!< in: archived log number to write */
 {
 	byte*	buf1;
@@ -1801,7 +1824,7 @@ Checks the consistency of the first data page of a tablespace
 at database startup.
 @retval NULL on success, or if innodb_force_recovery is set
 @return pointer to an error message string */
-static __attribute__((warn_unused_result))
+static MY_ATTRIBUTE((warn_unused_result))
 const char*
 fil_check_first_page(
 /*=================*/
@@ -2821,6 +2844,48 @@ fil_make_isl_name(
 	return(filename);
 }
 
+/** Test if a tablespace file can be renamed to a new filepath by checking
+if that the old filepath exists and the new filepath does not exist.
+@param[in]	space_id	tablespace id
+@param[in]	old_path	old filepath
+@param[in]	new_path	new filepath
+@param[in]	is_discarded	whether the tablespace is discarded
+@return innodb error code */
+dberr_t
+fil_rename_tablespace_check(
+	ulint		space_id,
+	const char*	old_path,
+	const char*	new_path,
+	bool		is_discarded)
+{
+	ulint	exists = false;
+	os_file_type_t	ftype;
+
+	if (!is_discarded
+	    && os_file_status(old_path, &exists, &ftype)
+	    && !exists) {
+		ib_logf(IB_LOG_LEVEL_ERROR,
+			"Cannot rename '%s' to '%s' for space ID %lu"
+			" because the source file does not exist.",
+			old_path, new_path, space_id);
+
+		return(DB_TABLESPACE_NOT_FOUND);
+	}
+
+	exists = false;
+	if (!os_file_status(new_path, &exists, &ftype) || exists) {
+		ib_logf(IB_LOG_LEVEL_ERROR,
+			"Cannot rename '%s' to '%s' for space ID %lu"
+			" because the target file exists."
+			" Remove the target file and try again.",
+			old_path, new_path, space_id);
+
+		return(DB_TABLESPACE_EXISTS);
+	}
+
+	return(DB_SUCCESS);
+}
+
 /*******************************************************************//**
 Renames a single-table tablespace. The tablespace must be cached in the
 tablespace memory cache.
@@ -3005,8 +3070,6 @@ fil_create_link_file(
 	const char*	tablename,	/*!< in: tablename */
 	const char*	filepath)	/*!< in: pathname of tablespace */
 {
-	os_file_t	file;
-	ibool		success;
 	dberr_t		err = DB_SUCCESS;
 	char*		link_filepath;
 	char*		prev_filepath = fil_read_link_file(tablename);
@@ -3025,13 +3088,24 @@ fil_create_link_file(
 
 	link_filepath = fil_make_isl_name(tablename);
 
-	file = os_file_create_simple_no_error_handling(
-		innodb_file_data_key, link_filepath,
-		OS_FILE_CREATE, OS_FILE_READ_WRITE, &success);
+	/** Check if the file already exists. */
+	FILE*                   file = NULL;
+	ibool                   exists;
+	os_file_type_t          ftype;
 
-	if (!success) {
-		/* The following call will print an error message */
-		ulint	error = os_file_get_last_error(true);
+	bool success = os_file_status(link_filepath, &exists, &ftype);
+
+	ulint error = 0;
+	if (success && !exists) {
+		file = fopen(link_filepath, "w");
+		if (file == NULL) {
+			/* This call will print its own error message */
+			error = os_file_get_last_error(true);
+		}
+	} else {
+		error = OS_FILE_ALREADY_EXISTS;
+	}
+	if (error != 0) {
 
 		ut_print_timestamp(stderr);
 		fputs("  InnoDB: Cannot create file ", stderr);
@@ -3056,13 +3130,17 @@ fil_create_link_file(
 		return(err);
 	}
 
-	if (!os_file_write(link_filepath, file, filepath, 0,
-			    strlen(filepath))) {
+	ulint rbytes = fwrite(filepath, 1, strlen(filepath), file);
+	if (rbytes != strlen(filepath)) {
+		os_file_get_last_error(true);
+		ib_logf(IB_LOG_LEVEL_ERROR,
+			"cannot write link file "
+			 "%s",filepath);
 		err = DB_ERROR;
 	}
 
 	/* Close the file, we only need it at startup */
-	os_file_close(file);
+	fclose(file);
 
 	mem_free(link_filepath);
 
@@ -4876,15 +4954,12 @@ fil_extend_space_to_desired_size(
 	byte*		buf;
 	ulint		buf_size;
 	ulint		start_page_no;
-	ulint		file_start_page_no;
 	ulint		page_size;
-	ulint		pages_added;
 	ibool		success;
 
 	ut_ad(!srv_read_only_mode);
 
 retry:
-	pages_added = 0;
 	success = TRUE;
 
 	fil_mutex_enter_and_prepare_for_io(space_id);
@@ -4938,29 +5013,36 @@ retry:
 	mutex_exit(&fil_system->mutex);
 
 	start_page_no = space->size;
-	file_start_page_no = space->size - node->size;
-
+	const ulint	file_start_page_no = space->size - node->size;
 #ifdef HAVE_POSIX_FALLOCATE
 	if (srv_use_posix_fallocate) {
-		os_offset_t	start_offset = start_page_no * page_size;
-		os_offset_t	n_pages = (size_after_extend - start_page_no);
-		os_offset_t	len = n_pages * page_size;
+		const os_offset_t	start_offset
+			= os_offset_t(start_page_no - file_start_page_no)
+			* page_size;
+		const ulint		n_pages
+			= size_after_extend - start_page_no;
+		const os_offset_t	len = os_offset_t(n_pages) * page_size;
 
-		if (posix_fallocate(node->handle, start_offset, len) == -1) {
-			ib_logf(IB_LOG_LEVEL_ERROR, "preallocating file "
-				"space for file \'%s\' failed.  Current size "
-				INT64PF ", desired size " INT64PF "\n",
-				node->name, start_offset, len+start_offset);
-			os_file_handle_error_no_exit(node->name, "posix_fallocate", FALSE);
-			success = FALSE;
-		} else {
-			success = TRUE;
+		int err;
+		do {
+			err = posix_fallocate(node->handle, start_offset, len);
+		} while (err == EINTR
+			 && srv_shutdown_state == SRV_SHUTDOWN_NONE);
+
+		success = !err;
+		if (!success) {
+			ib_logf(IB_LOG_LEVEL_ERROR, "extending file %s"
+				" from " INT64PF " to " INT64PF " bytes"
+				" failed with error %d",
+				node->name, start_offset, len + start_offset,
+				err);
 		}
 
 		DBUG_EXECUTE_IF("ib_os_aio_func_io_failure_28",
-			success = FALSE; errno = 28; os_has_said_disk_full = TRUE;);
+			success = FALSE; os_has_said_disk_full = TRUE;);
 
 		mutex_enter(&fil_system->mutex);
+
 		if (success) {
 			node->size += n_pages;
 			space->size += n_pages;
@@ -4977,14 +5059,24 @@ retry:
 	}
 #endif
 
+#ifdef _WIN32
+	/* Write 1 page of zeroes at the desired end. */
+	start_page_no = size_after_extend - 1;
+	buf_size = page_size;
+#else
 	/* Extend at most 64 pages at a time */
 	buf_size = ut_min(64, size_after_extend - start_page_no) * page_size;
-	buf2 = static_cast<byte*>(mem_alloc(buf_size + page_size));
+#endif
+	buf2 = static_cast<byte*>(calloc(1, buf_size + page_size));
+	if (!buf2) {
+		ib_logf(IB_LOG_LEVEL_ERROR, "Cannot allocate " ULINTPF
+			" bytes to extend file",
+			buf_size + page_size);
+		success = FALSE;
+	}
 	buf = static_cast<byte*>(ut_align(buf2, page_size));
 
-	memset(buf, 0, buf_size);
-
-	while (start_page_no < size_after_extend) {
+	while (success && start_page_no < size_after_extend) {
 		ulint		n_pages
 			= ut_min(buf_size / page_size,
 				 size_after_extend - start_page_no);
@@ -4992,6 +5084,7 @@ retry:
 		os_offset_t	offset
 			= ((os_offset_t) (start_page_no - file_start_page_no))
 			* page_size;
+
 #ifdef UNIV_HOTBACKUP
 		success = os_file_write(node->name, node->handle, buf,
 					offset, page_size * n_pages);
@@ -5002,44 +5095,37 @@ retry:
 				 NULL, NULL);
 #endif /* UNIV_HOTBACKUP */
 
-
 		DBUG_EXECUTE_IF("ib_os_aio_func_io_failure_28",
-			success = FALSE; errno = 28; os_has_said_disk_full = TRUE;);
+			success = FALSE; os_has_said_disk_full = TRUE;);
 
-		if (success) {
-			os_has_said_disk_full = FALSE;
-		} else {
-			/* Let us measure the size of the file to determine
-			how much we were able to extend it */
-			os_offset_t	size;
+		/* Let us measure the size of the file to determine
+		how much we were able to extend it */
+		os_offset_t	size = os_file_get_size(node->handle);
+		ut_a(size != (os_offset_t) -1);
 
-			size = os_file_get_size(node->handle);
-			ut_a(size != (os_offset_t) -1);
-
-			n_pages = ((ulint) (size / page_size))
-				- node->size - pages_added;
-
-			pages_added += n_pages;
-			break;
-		}
-
-		start_page_no += n_pages;
-		pages_added += n_pages;
+		start_page_no = (ulint) (size / page_size)
+			+ file_start_page_no;
 	}
 
-	mem_free(buf2);
+	free(buf2);
 
 	mutex_enter(&fil_system->mutex);
 
 	ut_a(node->being_extended);
+	ut_a(start_page_no - file_start_page_no >= node->size);
 
-	space->size += pages_added;
-	node->size += pages_added;
+	if (buf) {
+		ulint file_size = start_page_no - file_start_page_no;
+		space->size += file_size - node->size;
+		node->size = file_size;
+	}
 
 	fil_node_complete_io(node, fil_system, OS_FILE_WRITE);
 
 	/* At this point file has been extended */
+#ifdef HAVE_POSIX_FALLOCATE
 file_extended:
+#endif /* HAVE_POSIX_FALLOCATE */
 
 	node->being_extended = FALSE;
 	*actual_size = space->size;
@@ -5451,9 +5537,10 @@ fil_io(
 
 	space = fil_space_get_by_id(space_id);
 
-	/* If we are deleting a tablespace we don't allow any read
-	operations on that. However, we do allow write operations. */
-	if (space == 0 || (type == OS_FILE_READ && space->stop_new_ops)) {
+	/* If we are deleting a tablespace we don't allow async read operations
+	on that. However, we do allow write and sync read operations */
+	if (space == 0
+	    || (type == OS_FILE_READ && !sync && space->stop_new_ops)) {
 		mutex_exit(&fil_system->mutex);
 
 		ib_logf(IB_LOG_LEVEL_ERROR,
@@ -5567,18 +5654,20 @@ fil_io(
 	ut_a(byte_offset % OS_FILE_LOG_BLOCK_SIZE == 0);
 	ut_a((len % OS_FILE_LOG_BLOCK_SIZE) == 0);
 
+	const char* name = node->name == NULL ? space->name : node->name;
+
 #ifdef UNIV_HOTBACKUP
 	/* In mysqlbackup do normal i/o, not aio */
 	if (type == OS_FILE_READ) {
 		ret = os_file_read(node->handle, buf, offset, len);
 	} else {
 		ut_ad(!srv_read_only_mode);
-		ret = os_file_write(node->name, node->handle, buf,
+		ret = os_file_write(name, node->handle, buf,
 				    offset, len);
 	}
 #else
 	/* Queue the aio request */
-	ret = os_aio(type, mode | wake_later, node->name, node->handle, buf,
+	ret = os_aio(type, mode | wake_later, name, node->handle, buf,
 		     offset, len, node, message);
 #endif /* UNIV_HOTBACKUP */
 
@@ -5598,8 +5687,9 @@ fil_io(
 
 	if (!ret) {
 		return(DB_OUT_OF_FILE_SPACE);
-	} else {
-	}	return(DB_SUCCESS);
+	}
+
+	return(DB_SUCCESS);
 }
 
 #ifndef UNIV_HOTBACKUP
@@ -6398,29 +6488,108 @@ fil_get_space_names(
 	return(err);
 }
 
-/****************************************************************//**
-Generate redo logs for swapping two .ibd files */
+/** Generate redo log for swapping two .ibd files
+@param[in]	old_table	old table
+@param[in]	new_table	new table
+@param[in]	tmp_name	temporary table name
+@param[in,out]	mtr		mini-transaction
+@return innodb error code */
 UNIV_INTERN
-void
+dberr_t
 fil_mtr_rename_log(
-/*===============*/
-	ulint		old_space_id,	/*!< in: tablespace id of the old
-					table. */
-	const char*	old_name,	/*!< in: old table name */
-	ulint		new_space_id,	/*!< in: tablespace id of the new
-					table */
-	const char*	new_name,	/*!< in: new table name */
-	const char*	tmp_name,	/*!< in: temp table name used while
-					swapping */
-	mtr_t*		mtr)		/*!< in/out: mini-transaction */
+	const dict_table_t*	old_table,
+	const dict_table_t*	new_table,
+	const char*		tmp_name,
+	mtr_t*			mtr)
 {
-	if (old_space_id != TRX_SYS_SPACE) {
-		fil_op_write_log(MLOG_FILE_RENAME, old_space_id,
-				 0, 0, old_name, tmp_name, mtr);
+	dberr_t	err = DB_SUCCESS;
+	char*	old_path;
+
+	/* If neither table is file-per-table,
+	there will be no renaming of files. */
+	if (old_table->space == TRX_SYS_SPACE
+	    && new_table->space == TRX_SYS_SPACE) {
+		return(DB_SUCCESS);
 	}
 
-	if (new_space_id != TRX_SYS_SPACE) {
-		fil_op_write_log(MLOG_FILE_RENAME, new_space_id,
-				 0, 0, new_name, old_name, mtr);
+	if (DICT_TF_HAS_DATA_DIR(old_table->flags)) {
+		old_path = os_file_make_remote_pathname(
+			old_table->data_dir_path, old_table->name, "ibd");
+	} else {
+		old_path = fil_make_ibd_name(old_table->name, false);
 	}
+	if (old_path == NULL) {
+		return(DB_OUT_OF_MEMORY);
+	}
+
+	if (old_table->space != TRX_SYS_SPACE) {
+		char*	tmp_path;
+
+		if (DICT_TF_HAS_DATA_DIR(old_table->flags)) {
+			tmp_path = os_file_make_remote_pathname(
+				old_table->data_dir_path, tmp_name, "ibd");
+		}
+		else {
+			tmp_path = fil_make_ibd_name(tmp_name, false);
+		}
+
+		if (tmp_path == NULL) {
+			mem_free(old_path);
+			return(DB_OUT_OF_MEMORY);
+		}
+
+		/* Temp filepath must not exist. */
+		err = fil_rename_tablespace_check(
+			old_table->space, old_path, tmp_path,
+			dict_table_is_discarded(old_table));
+		mem_free(tmp_path);
+		if (err != DB_SUCCESS) {
+			mem_free(old_path);
+			return(err);
+		}
+
+		fil_op_write_log(MLOG_FILE_RENAME, old_table->space,
+				 0, 0, old_table->name, tmp_name, mtr);
+	}
+
+	if (new_table->space != TRX_SYS_SPACE) {
+
+		/* Destination filepath must not exist unless this ALTER
+		TABLE starts and ends with a file_per-table tablespace. */
+		if (old_table->space == TRX_SYS_SPACE) {
+			char*	new_path = NULL;
+
+			if (DICT_TF_HAS_DATA_DIR(new_table->flags)) {
+				new_path = os_file_make_remote_pathname(
+					new_table->data_dir_path,
+					new_table->name, "ibd");
+			}
+			else {
+				new_path = fil_make_ibd_name(
+					new_table->name, false);
+			}
+
+			if (new_path == NULL) {
+				mem_free(old_path);
+				return(DB_OUT_OF_MEMORY);
+			}
+
+			err = fil_rename_tablespace_check(
+				new_table->space, new_path, old_path,
+				dict_table_is_discarded(new_table));
+			mem_free(new_path);
+			if (err != DB_SUCCESS) {
+				mem_free(old_path);
+				return(err);
+			}
+		}
+
+		fil_op_write_log(MLOG_FILE_RENAME, new_table->space,
+				 0, 0, new_table->name, old_table->name, mtr);
+
+	}
+
+	mem_free(old_path);
+
+	return(err);
 }

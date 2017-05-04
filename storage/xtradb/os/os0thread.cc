@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2013, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -145,9 +145,7 @@ os_thread_create_func(
 	os_thread_t	thread;
 	DWORD		win_thread_id;
 
-	os_mutex_enter(os_sync_mutex);
-	os_thread_count++;
-	os_mutex_exit(os_sync_mutex);
+	os_atomic_increment_ulint(&os_thread_count, 1);
 
 	thread = CreateThread(NULL,	/* no security attributes */
 			      0,	/* default size stack */
@@ -186,9 +184,8 @@ os_thread_create_func(
 		exit(1);
 	}
 #endif
-	os_mutex_enter(os_sync_mutex);
-	os_thread_count++;
-	os_mutex_exit(os_sync_mutex);
+	ulint new_count = os_atomic_increment_ulint(&os_thread_count, 1);
+	ut_a(new_count <= OS_THREAD_MAX_N);
 
 #ifdef UNIV_HPUX10
 	ret = pthread_create(&pthread, pthread_attr_default, func, arg);
@@ -205,8 +202,6 @@ os_thread_create_func(
 	pthread_attr_destroy(&attr);
 #endif
 
-	ut_a(os_thread_count <= OS_THREAD_MAX_N);
-
 	if (thread_id) {
 		*thread_id = pthread;
 	}
@@ -215,14 +210,45 @@ os_thread_create_func(
 #endif
 }
 
+/** Waits until the specified thread completes and joins it.
+Its return value is ignored.
+@param[in,out]	thread	thread to join */
+UNIV_INTERN
+void
+os_thread_join(
+	os_thread_t	thread)
+{
+	/* This function is currently only used to workaround glibc bug
+	described in http://bugs.mysql.com/bug.php?id=82886
+
+	On Windows, no workarounds are necessary, all threads
+	are "detached" upon thread exit (handle is closed), so we do
+	nothing.
+	*/
+#ifdef __WIN__
+	/* Do nothing. */
+#else
+#ifdef UNIV_DEBUG
+	const int	ret MY_ATTRIBUTE((unused)) =
+#endif /* UNIV_DEBUG */
+	pthread_join(thread, NULL);
+
+	/* Waiting on already-quit threads is allowed. */
+	ut_ad(ret == 0 || ret == ESRCH);
+#endif /* __WIN__ */
+}
+
 /*****************************************************************//**
 Exits the current thread. */
 UNIV_INTERN
 void
 os_thread_exit(
 /*===========*/
-	void*	exit_value)	/*!< in: exit value; in Windows this void*
+	void*	exit_value,	/*!< in: exit value; in Windows this void*
 				is cast as a DWORD */
+	bool	detach)		/*!< in: if true, the thread will be detached
+				right before exiting. If false, another thread
+				is responsible for joining this thread. */
 {
 #ifdef UNIV_DEBUG_THREAD_CREATION
 	fprintf(stderr, "Thread exits, id %lu\n",
@@ -233,14 +259,14 @@ os_thread_exit(
 	pfs_delete_thread();
 #endif
 
-	os_mutex_enter(os_sync_mutex);
-	os_thread_count--;
-	os_mutex_exit(os_sync_mutex);
+	os_atomic_decrement_ulint(&os_thread_count, 1);
 
 #ifdef __WIN__
 	ExitThread((DWORD) exit_value);
 #else
-	pthread_detach(pthread_self());
+	if (detach) {
+		pthread_detach(pthread_self());
+	}
 	pthread_exit(exit_value);
 #endif
 }

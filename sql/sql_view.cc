@@ -245,7 +245,7 @@ fill_defined_view_parts (THD *thd, TABLE_LIST *view)
   @param mode VIEW_CREATE_NEW, VIEW_ALTER, VIEW_CREATE_OR_REPLACE
 
   @retval FALSE Operation was a success.
-  @retval TRUE An error occured.
+  @retval TRUE An error occurred.
 */
 
 bool create_view_precheck(THD *thd, TABLE_LIST *tables, TABLE_LIST *view,
@@ -388,7 +388,7 @@ bool create_view_precheck(THD *thd, TABLE_LIST *tables, TABLE_LIST *view,
   @note This function handles both create and alter view commands.
 
   @retval FALSE Operation was a success.
-  @retval TRUE An error occured.
+  @retval TRUE An error occurred.
 */
 
 bool mysql_create_view(THD *thd, TABLE_LIST *views,
@@ -429,6 +429,15 @@ bool mysql_create_view(THD *thd, TABLE_LIST *views,
 
   lex->link_first_table_back(view, link_to_local);
   view->open_type= OT_BASE_ONLY;
+
+  /*
+    ignore lock specs for CREATE statement
+  */
+  if (lex->current_select->lock_type != TL_READ_DEFAULT)
+  {
+    lex->current_select->set_lock_for_tables(TL_READ_DEFAULT);
+    view->mdl_request.set_type(MDL_EXCLUSIVE);
+  }
 
   if (open_temporary_tables(thd, lex->query_tables) ||
       open_and_lock_tables(thd, lex->query_tables, TRUE, 0))
@@ -1493,6 +1502,10 @@ bool mysql_make_view(THD *thd, File_parser *parser, TABLE_LIST *table,
       */
       lex->sql_command= old_lex->sql_command;
       lex->duplicates= old_lex->duplicates;
+
+      /* Fields in this view can be used in upper select in case of merge.  */
+      if (table->select_lex)
+        table->select_lex->add_where_field(&lex->select_lex);
     }
     /*
       This method has a dependency on the proper lock type being set,

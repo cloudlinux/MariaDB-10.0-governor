@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2015, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
 
 This program is free software; you can redistribute it and/or modify it under
@@ -306,7 +306,7 @@ dict_mem_table_add_col(
 
 /**********************************************************************//**
 Renames a column of a table in the data dictionary cache. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 dict_mem_table_col_rename_low(
 /*==========================*/
@@ -420,7 +420,8 @@ dict_mem_table_col_rename_low(
 			dict_index_t* new_index = dict_foreign_find_index(
 				foreign->foreign_table, NULL,
 				foreign->foreign_col_names,
-				foreign->n_fields, NULL, true, false);
+				foreign->n_fields, NULL, true, false,
+				NULL, NULL, NULL);
 			/* There must be an equivalent index in this case. */
 			ut_ad(new_index != NULL);
 

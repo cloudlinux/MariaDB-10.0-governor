@@ -37,6 +37,8 @@
 #include "file.hpp"             // for TaoCrypt Source
 #include "coding.hpp"           // HexDecoder
 #include "helpers.hpp"          // for placement new hack
+#include "rsa.hpp"              // for TaoCrypt RSA key decode
+#include "dsa.hpp"              // for TaoCrypt DSA key decode
 #include <stdio.h>
 #include <time.h>
 
@@ -55,6 +57,8 @@ namespace yaSSL {
 
 int read_file(SSL_CTX* ctx, const char* file, int format, CertType type)
 {
+    int ret = SSL_SUCCESS;
+
     if (format != SSL_FILETYPE_ASN1 && format != SSL_FILETYPE_PEM)
         return SSL_BAD_FILETYPE;
 
@@ -142,8 +146,31 @@ int read_file(SSL_CTX* ctx, const char* file, int format, CertType type)
             }
         }
     }
+
+    if (type == PrivateKey && ctx->privateKey_) {
+        // see if key is valid early
+        TaoCrypt::Source rsaSource(ctx->privateKey_->get_buffer(),
+                                   ctx->privateKey_->get_length());
+        TaoCrypt::RSA_PrivateKey rsaKey;
+        rsaKey.Initialize(rsaSource);
+
+        if (rsaSource.GetError().What()) {
+            // rsa failed see if DSA works
+
+            TaoCrypt::Source dsaSource(ctx->privateKey_->get_buffer(),
+                                       ctx->privateKey_->get_length());
+            TaoCrypt::DSA_PrivateKey dsaKey;
+            dsaKey.Initialize(dsaSource);
+
+            if (dsaSource.GetError().What()) {
+                // neither worked
+                ret = SSL_FAILURE;
+            }
+        }
+    }
+
     fclose(input);
-    return SSL_SUCCESS;
+    return ret;
 }
 
 
@@ -747,7 +774,6 @@ int SSL_CTX_load_verify_locations(SSL_CTX* ctx, const char* file,
                                   const char* path)
 {
     int       ret = SSL_FAILURE;
-    const int HALF_PATH = 128;
 
     if (file) ret = read_file(ctx, file, SSL_FILETYPE_PEM, CA);
 
@@ -758,40 +784,67 @@ int SSL_CTX_load_verify_locations(SSL_CTX* ctx, const char* file,
         WIN32_FIND_DATA FindFileData;
         HANDLE hFind;
 
-        char name[MAX_PATH + 1];  // directory specification
-        strncpy(name, path, MAX_PATH - 3);
-        strncat(name, "\\*", 3);
+        const int DELIMITER_SZ      = 2;
+        const int DELIMITER_STAR_SZ = 3;
+        int pathSz = (int)strlen(path);
+        int nameSz = pathSz + DELIMITER_STAR_SZ + 1; // plus 1 for terminator
+        char* name = NEW_YS char[nameSz];  // directory specification
+        memset(name, 0, nameSz);
+        strncpy(name, path, nameSz - DELIMITER_STAR_SZ - 1);
+        strncat(name, "\\*", DELIMITER_STAR_SZ);
 
         hFind = FindFirstFile(name, &FindFileData);
-        if (hFind == INVALID_HANDLE_VALUE) return SSL_BAD_PATH;
+        if (hFind == INVALID_HANDLE_VALUE) {
+            ysArrayDelete(name);
+            return SSL_BAD_PATH;
+        }
 
         do {
-            if (FindFileData.dwFileAttributes != FILE_ATTRIBUTE_DIRECTORY) {
-                strncpy(name, path, MAX_PATH - 2 - HALF_PATH);
-                strncat(name, "\\", 2);
-                strncat(name, FindFileData.cFileName, HALF_PATH);
+            if (!(FindFileData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                int curSz = (int)strlen(FindFileData.cFileName);
+                if (pathSz + curSz + DELIMITER_SZ + 1 > nameSz) {
+                    ysArrayDelete(name);
+                    // plus 1 for terminator
+                    nameSz = pathSz + curSz + DELIMITER_SZ + 1;
+                    name = NEW_YS char[nameSz];
+                }
+                memset(name, 0, nameSz);
+                strncpy(name, path, nameSz - curSz - DELIMITER_SZ - 1);
+                strncat(name, "\\", DELIMITER_SZ);
+                strncat(name, FindFileData.cFileName,
+                                            nameSz - pathSz - DELIMITER_SZ - 1);
                 ret = read_file(ctx, name, SSL_FILETYPE_PEM, CA);
             }
         } while (ret == SSL_SUCCESS && FindNextFile(hFind, &FindFileData));
 
+        ysArrayDelete(name);
         FindClose(hFind);
 
 #else   // _WIN32
-
-        const int MAX_PATH = 260;
-
         DIR* dir = opendir(path);
         if (!dir) return SSL_BAD_PATH;
 
         struct dirent* entry;
         struct stat    buf;
-        char           name[MAX_PATH + 1];
+        const int DELIMITER_SZ = 1;
+        int pathSz = (int)strlen(path);
+        int nameSz = pathSz + DELIMITER_SZ + 1; //plus 1 for null terminator
+        char* name = NEW_YS char[nameSz];  // directory specification
 
         while (ret == SSL_SUCCESS && (entry = readdir(dir))) {
-            strncpy(name, path, MAX_PATH - 1 - HALF_PATH);
-            strncat(name, "/", 1);
-            strncat(name, entry->d_name, HALF_PATH);
+            int curSz = (int)strlen(entry->d_name);
+            if (pathSz + curSz + DELIMITER_SZ + 1 > nameSz) {
+                ysArrayDelete(name);
+                nameSz = pathSz + DELIMITER_SZ + curSz + 1;
+                name = NEW_YS char[nameSz];
+            }
+            memset(name, 0, nameSz);
+            strncpy(name, path, nameSz - curSz - 1);
+            strncat(name, "/",  DELIMITER_SZ);
+            strncat(name, entry->d_name, nameSz - pathSz - DELIMITER_SZ - 1);
+
             if (stat(name, &buf) < 0) {
+                ysArrayDelete(name);
                 closedir(dir);
                 return SSL_BAD_STAT;
             }
@@ -800,6 +853,7 @@ int SSL_CTX_load_verify_locations(SSL_CTX* ctx, const char* file,
                 ret = read_file(ctx, name, SSL_FILETYPE_PEM, CA);
         }
 
+        ysArrayDelete(name);
         closedir(dir);
 
 #endif
@@ -1324,15 +1378,13 @@ int ASN1_STRING_type(ASN1_STRING *x)
 int X509_NAME_get_index_by_NID(X509_NAME* name,int nid, int lastpos)
 {
     int idx = -1;  // not found
-    const char* start = &name->GetName()[lastpos + 1];
+    int cnPos = -1;
 
     switch (nid) {
     case NID_commonName:
-        const char* found = strstr(start, "/CN=");
-        if (found) {
-            found += 4;  // advance to str
-            idx = found - start + lastpos + 1;
-        }
+        cnPos = name->GetCnPosition();
+        if (lastpos < cnPos)
+            idx = cnPos;
         break;
     }
 
@@ -1444,10 +1496,6 @@ int SSL_peek(SSL* ssl, void* buffer, int sz)
 
 int SSL_pending(SSL* ssl)
 {
-    // Just in case there's pending data that hasn't been processed yet...
-    char c;
-    SSL_peek(ssl, &c, 1);
-    
     return ssl->bufferedData();
 }
 

@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2015, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2014, 2015, MariaDB Corporation
 
 This program is free software; you can redistribute it and/or modify it under
@@ -424,7 +424,7 @@ ibool
 lock_rec_validate_page(
 /*===================*/
 	const buf_block_t*	block)	/*!< in: buffer block */
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((nonnull, warn_unused_result));
 #endif /* UNIV_DEBUG */
 
 /* The lock system */
@@ -508,7 +508,7 @@ Checks that a transaction id is sensible, i.e., not in the future.
 #ifdef UNIV_DEBUG
 UNIV_INTERN
 #else
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 #endif
 bool
 lock_check_trx_id_sanity(
@@ -634,7 +634,7 @@ lock_sys_create(
 	lock_sys->rec_num = 0;
 
 	if (!srv_read_only_mode) {
-		lock_latest_err_file = os_file_create_tmpfile();
+		lock_latest_err_file = os_file_create_tmpfile(NULL);
 		ut_a(lock_latest_err_file);
 	}
 }
@@ -655,6 +655,17 @@ lock_sys_close(void)
 
 	mutex_free(&lock_sys->mutex);
 	mutex_free(&lock_sys->wait_mutex);
+
+	os_event_free(lock_sys->timeout_event);
+
+	for (srv_slot_t* slot = lock_sys->waiting_threads;
+	     slot < lock_sys->waiting_threads + OS_THREAD_MAX_N; slot++) {
+
+		ut_ad(!slot->in_use);
+		ut_ad(!slot->thr);
+		if (slot->event != NULL)
+			os_event_free(slot->event);
+	}
 
 	mem_free(lock_stack);
 	mem_free(lock_sys);
@@ -1562,7 +1573,7 @@ lock_rec_has_expl(
 /*********************************************************************//**
 Checks if some other transaction has a lock request in the queue.
 @return	lock or NULL */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 const lock_t*
 lock_rec_other_has_expl_req(
 /*========================*/
@@ -2714,8 +2725,8 @@ lock_rec_inherit_to_gap(
 	/* If srv_locks_unsafe_for_binlog is TRUE or session is using
 	READ COMMITTED isolation level, we do not want locks set
 	by an UPDATE or a DELETE to be inherited as gap type locks. But we
-	DO want S-locks set by a consistency constraint to be inherited also
-	then. */
+	DO want S-locks/X-locks(taken for replace) set by a consistency
+	constraint to be inherited also then */
 
 	for (lock = lock_rec_get_first(block, heap_no);
 	     lock != NULL;
@@ -2725,7 +2736,8 @@ lock_rec_inherit_to_gap(
 		    && !((srv_locks_unsafe_for_binlog
 			  || lock->trx->isolation_level
 			  <= TRX_ISO_READ_COMMITTED)
-			 && lock_get_mode(lock) == LOCK_X)) {
+			 && lock_get_mode(lock) ==
+			 (lock->trx->duplicates ? LOCK_S : LOCK_X))) {
 
 			lock_rec_add_to_queue(
 				LOCK_REC | LOCK_GAP | lock_get_mode(lock),
@@ -3695,7 +3707,7 @@ lock_get_next_lock(
 			ut_ad(heap_no == ULINT_UNDEFINED);
 			ut_ad(lock_get_type_low(lock) == LOCK_TABLE);
 
-			lock = UT_LIST_GET_PREV(un_member.tab_lock.locks, lock);
+			lock = UT_LIST_GET_NEXT(un_member.tab_lock.locks, lock);
 		}
 	} while (lock != NULL
 		 && lock->trx->lock.deadlock_mark > ctx->mark_start);
@@ -3745,7 +3757,8 @@ lock_get_first_lock(
 	} else {
 		*heap_no = ULINT_UNDEFINED;
 		ut_ad(lock_get_type_low(lock) == LOCK_TABLE);
-		lock = UT_LIST_GET_PREV(un_member.tab_lock.locks, lock);
+		dict_table_t*   table = lock->un_member.tab_lock.table;
+		lock = UT_LIST_GET_FIRST(table->locks);
 	}
 
 	ut_a(lock != NULL);
@@ -4184,8 +4197,6 @@ lock_deadlock_check_and_resolve(
 				lock_deadlock_joining_trx_print(trx, lock);
 			}
 
-			MONITOR_INC(MONITOR_DEADLOCK);
-
 		} else if (victim_trx_id != 0 && victim_trx_id != trx->id) {
 
 			ut_ad(victim_trx_id == ctx.wait_lock->trx->id);
@@ -4194,14 +4205,15 @@ lock_deadlock_check_and_resolve(
 			lock_deadlock_found = TRUE;
 
 			MONITOR_INC(MONITOR_DEADLOCK);
+			srv_stats.lock_deadlock_count.inc();
 		}
-
 	} while (victim_trx_id != 0 && victim_trx_id != trx->id);
 
 	/* If the joining transaction was selected as the victim. */
 	if (victim_trx_id != 0) {
 		ut_a(victim_trx_id == trx->id);
 
+		MONITOR_INC(MONITOR_DEADLOCK);
 		srv_stats.lock_deadlock_count.inc();
 
 		lock_deadlock_fputs("*** WE ROLL BACK TRANSACTION (2)\n");
@@ -4574,7 +4586,8 @@ lock_table(
 	dberr_t		err;
 	const lock_t*	wait_for;
 
-	ut_ad(table && thr);
+	ut_ad(table != NULL);
+	ut_ad(thr != NULL);
 
 	if (flags & BTR_NO_LOCKING_FLAG) {
 
@@ -6000,7 +6013,7 @@ lock_validate_table_locks(
 /*********************************************************************//**
 Validate record locks up to a limit.
 @return lock at limit or NULL if no more locks in the hash bucket */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 const lock_t*
 lock_rec_validate(
 /*==============*/

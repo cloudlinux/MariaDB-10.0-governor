@@ -127,14 +127,15 @@ class DllExport STRING : public BLOCK {
 
   // Implementation
   inline int    GetLength(void) {return (int)Length;}
-  inline PSZ    GetStr(void) {return Strp;}
+	inline void   SetLength(uint n) {Length = n;}
+	inline PSZ    GetStr(void) {return Strp;}
   inline uint32 GetSize(void) {return Size;}
 
   // Methods
   inline void   Reset(void) {*Strp = 0;}
          bool   Set(PSZ s);
          bool   Set(char *s, uint n);
-         bool   Append(const char *s, uint ln);
+         bool   Append(const char *s, uint ln, bool nq = false);
          bool   Append(PSZ s);
          bool   Append(STRING &str);
          bool   Append(char c);

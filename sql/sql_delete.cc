@@ -466,6 +466,9 @@ bool mysql_delete(THD *thd, TABLE_LIST *table_list, COND *conds,
   DBUG_EXECUTE_IF("show_explain_probe_delete_exec_start", 
                   dbug_serve_apcs(thd, 1););
 
+  if (!(select && select->quick))
+    status_var_increment(thd->status_var.delete_scan_count);
+
   if (query_plan.using_filesort)
   {
     ha_rows examined_rows;
@@ -508,17 +511,18 @@ bool mysql_delete(THD *thd, TABLE_LIST *table_list, COND *conds,
     free_underlaid_joins(thd, select_lex);
     DBUG_RETURN(TRUE);
   }
+
   if (query_plan.index == MAX_KEY || (select && select->quick))
-  {
-    if (init_read_record(&info, thd, table, select, 1, 1, FALSE))
-    {
-      delete select;
-      free_underlaid_joins(thd, select_lex);
-      DBUG_RETURN(TRUE);
-    }
-  }
+    error= init_read_record(&info, thd, table, select, 1, 1, FALSE);
   else
-    init_read_record_idx(&info, thd, table, 1, query_plan.index, reverse);
+    error= init_read_record_idx(&info, thd, table, 1, query_plan.index,
+                                reverse);
+  if (error)
+  {
+    delete select;
+    free_underlaid_joins(thd, select_lex);
+    DBUG_RETURN(TRUE);
+  }
 
   init_ftfuncs(thd, select_lex, 1);
   THD_STAGE_INFO(thd, stage_updating);
@@ -544,9 +548,7 @@ bool mysql_delete(THD *thd, TABLE_LIST *table_list, COND *conds,
 	 ! thd->is_error())
   {
     if (table->vfield)
-      update_virtual_fields(thd, table,
-                            table->triggers ? VCOL_UPDATE_ALL :
-                                              VCOL_UPDATE_FOR_READ);
+      update_virtual_fields(thd, table, VCOL_UPDATE_FOR_READ);
     thd->inc_examined_row_count(1);
     // thd->is_error() is tested to disallow delete row on error
     if (!select || select->skip_record(thd) > 0)
@@ -1293,4 +1295,3 @@ bool multi_delete::send_eof()
   }
   return 0;
 }
-

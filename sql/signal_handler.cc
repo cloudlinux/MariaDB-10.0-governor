@@ -64,6 +64,12 @@ extern "C" sig_handler handle_fatal_signal(int sig)
   struct tm tm;
 #ifdef HAVE_STACKTRACE
   THD *thd;
+  /*
+     This flag remembers if the query pointer was found invalid.
+     We will try and print the query at the end of the signal handler, in case
+     we're wrong.
+  */
+  bool print_invalid_query_pointer= false;
 #endif
 
   if (segfaulted)
@@ -100,7 +106,7 @@ extern "C" sig_handler handle_fatal_signal(int sig)
     "or misconfigured. This error can also be caused by malfunctioning hardware.\n\n");
 
   my_safe_printf_stderr("%s",
-                        "To report this bug, see http://kb.askmonty.org/en/reporting-bugs\n\n");
+                        "To report this bug, see https://mariadb.com/kb/en/reporting-bugs\n\n");
 
   my_safe_printf_stderr("%s",
     "We will try our best to scrape up some info that will hopefully help\n"
@@ -143,7 +149,7 @@ extern "C" sig_handler handle_fatal_signal(int sig)
 
   if (opt_stack_trace)
   {
-    my_safe_printf_stderr("Thread pointer: 0x%p\n", thd);
+    my_safe_printf_stderr("Thread pointer: %p\n", thd);
     my_safe_printf_stderr("%s",
       "Attempting backtrace. You can use the following "
       "information to find out\n"
@@ -190,7 +196,12 @@ extern "C" sig_handler handle_fatal_signal(int sig)
       "Some pointers may be invalid and cause the dump to abort.\n");
 
     my_safe_printf_stderr("Query (%p): ", thd->query());
-    my_safe_print_str(thd->query(), MY_MIN(65536U, thd->query_length()));
+    if (my_safe_print_str(thd->query(), MY_MIN(65536U, thd->query_length())))
+    {
+      // Query was found invalid. We will try to print it at the end.
+      print_invalid_query_pointer= true;
+    }
+
     my_safe_printf_stderr("\nConnection ID (thread ID): %lu\n",
                           (ulong) thd->thread_id);
     my_safe_printf_stderr("Status: %s\n\n", kreason);
@@ -216,7 +227,7 @@ extern "C" sig_handler handle_fatal_signal(int sig)
   if (calling_initgroups)
   {
     my_safe_printf_stderr("%s", "\n"
-      "This crash occured while the server was calling initgroups(). This is\n"
+      "This crash occurred while the server was calling initgroups(). This is\n"
       "often due to the use of a mysqld that is statically linked against \n"
       "glibc and configured to use LDAP in /etc/nsswitch.conf.\n"
       "You will need to either upgrade to a version of glibc that does not\n"
@@ -253,6 +264,18 @@ extern "C" sig_handler handle_fatal_signal(int sig)
       "\"--memlock\" parameter and/or consult the OS distributer about "
       "\"mlockall\" bugs.\n");
   }
+
+#ifdef HAVE_STACKTRACE
+  if (print_invalid_query_pointer)
+  {
+    my_safe_printf_stderr(
+        "\nWe think the query pointer is invalid, but we will try "
+        "to print it anyway. \n"
+        "Query: ");
+    my_write_stderr(thd->query(), MY_MIN(65536U, thd->query_length()));
+    my_safe_printf_stderr("\n\n");
+  }
+#endif
 
 #ifdef HAVE_WRITE_CORE
   if (test_flags & TEST_CORE_ON_SIGNAL)

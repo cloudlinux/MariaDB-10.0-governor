@@ -1,3 +1,7 @@
+if (`select plugin_auth_version < "5.6.26" from information_schema.plugins where plugin_name='innodb'`)
+{
+  --skip Not fixed in XtraDB below 5.6.26
+}
 --source include/have_innodb.inc
 #
 # Test of alter table
@@ -1694,4 +1698,72 @@ create table t1 (i int);
 alter table t1 add unique index if not exists idx(i);
 alter table t1 add unique index if not exists idx(i);
 show create table t1;
+DROP TABLE t1;
+
+#
+# MDEV-8358 ADD PRIMARY KEY IF NOT EXISTS -> ERROR 1068 (42000): Multiple primary key
+#
+
+CREATE TABLE t1 (
+   `event_id` bigint(20) unsigned NOT NULL DEFAULT '0',
+   `market_id` bigint(20) unsigned NOT NULL DEFAULT '0',
+ PRIMARY KEY (`event_id`,`market_id`)
+ );
+ALTER TABLE t1 ADD PRIMARY KEY IF NOT EXISTS event_id (event_id,market_id);
+DROP TABLE t1;
+
+--echo #
+--echo # MDEV-11126 Crash while altering persistent virtual column
+--echo #
+
+CREATE TABLE `tab1` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `field2` set('option1','option2','option3','option4') NOT NULL,
+  `field3` set('option1','option2','option3','option4','option5') NOT NULL,
+  `field4` set('option1','option2','option3','option4') NOT NULL,
+  `field5` varchar(32) NOT NULL,
+  `field6` varchar(32) NOT NULL,
+  `field7` varchar(32) NOT NULL,
+  `field8` varchar(32) NOT NULL,
+  `field9` int(11) NOT NULL DEFAULT '1',
+  `field10` varchar(16) NOT NULL,
+  `field11` enum('option1','option2','option3') NOT NULL DEFAULT 'option1',
+  `v_col` varchar(128) AS (IF(field11='option1',CONCAT_WS(":","field1",field2,field3,field4,field5,field6,field7,field8,field9,field10), CONCAT_WS(":","field1",field11,field2,field3,field4,field5,field6,field7,field8,field9,field10))) PERSISTENT,
+  PRIMARY KEY (`id`)
+) DEFAULT CHARSET=latin1;
+
+ALTER TABLE `tab1` CHANGE COLUMN v_col `v_col` varchar(128);
+SHOW CREATE TABLE `tab1`;
+ALTER TABLE `tab1` CHANGE COLUMN v_col `v_col` varchar(128) AS (IF(field11='option1',CONCAT_WS(":","field1",field2,field3,field4,field5,field6,field7,field8,field9,field10), CONCAT_WS(":","field1",field11,field2,field3,field4,field5,field6,field7,field8,field9,field10))) PERSISTENT;
+SHOW CREATE TABLE `tab1`;
+DROP TABLE `tab1`;
+
+--echo #
+--echo # MDEV-11548 Reproducible server crash after the 2nd ALTER TABLE ADD FOREIGN KEY IF NOT EXISTS
+--echo #
+ 
+CREATE TABLE t1 (id INT UNSIGNED NOT NULL PRIMARY KEY);
+CREATE TABLE t2 (id1 INT UNSIGNED NOT NULL);
+ 
+ALTER TABLE t2
+ADD FOREIGN KEY IF NOT EXISTS (id1)
+  REFERENCES t1 (id);
+   
+ALTER TABLE t2
+ADD FOREIGN KEY IF NOT EXISTS (id1)
+REFERENCES t1 (id);
+
+DROP TABLE t2;
+DROP TABLE t1;
+
+
+--echo #
+--echo # MDEV-6390 CONVERT TO CHARACTER SET utf8 doesn't change DEFAULT CHARSET.
+--echo #
+ 
+CREATE TABLE t1 (id int(11) NOT NULL, a int(11) NOT NULL, b int(11))
+  ENGINE=InnoDB DEFAULT CHARSET=latin1;
+SHOW CREATE TABLE t1;
+ALTER TABLE t1 CONVERT TO CHARACTER SET utf8;
+SHOW CREATE TABLE t1;
 DROP TABLE t1;

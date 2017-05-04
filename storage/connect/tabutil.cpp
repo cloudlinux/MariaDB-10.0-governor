@@ -1,7 +1,7 @@
 /************* Tabutil cpp Declares Source Code File (.CPP) ************/
-/*  Name: TABUTIL.CPP   Version 1.1                                    */
+/*  Name: TABUTIL.CPP   Version 1.2                                    */
 /*                                                                     */
-/*  (C) Copyright to the author Olivier BERTRAND          2013 - 2015  */
+/*  (C) Copyright to the author Olivier BERTRAND          2013 - 2017  */
 /*                                                                     */
 /*  Utility function used by the PROXY, XCOL, OCCUR, and TBL tables.   */
 /***********************************************************************/
@@ -45,8 +45,9 @@
 #include "myutil.h"
 #include "valblk.h"
 #include "resource.h"
-#include "reldef.h"
+//#include "reldef.h"
 #include "xtable.h"
+#include "tabext.h"
 #include "tabmysql.h"
 #include "tabcol.h"
 #include "tabutil.h"
@@ -118,7 +119,7 @@ PQRYRES TabColumns(PGLOBAL g, THD *thd, const char *db,
                    FLD_LENGTH, FLD_SCALE, FLD_RADIX,    FLD_NULL,
                    FLD_REM,    FLD_NO,    FLD_CHARSET};
   unsigned int length[] = {0, 4, 16, 4, 4, 4, 4, 4, 0, 32, 32};
-  char        *fld, *colname, *chset, *fmt, v;
+  char        *pn, *tn, *fld, *colname, *chset, *fmt, v;
   int          i, n, ncol = sizeof(buftyp) / sizeof(int);
   int          prec, len, type, scale;
   int          zconv = GetConvSize();
@@ -130,7 +131,16 @@ PQRYRES TabColumns(PGLOBAL g, THD *thd, const char *db,
   PCOLRES      crp;
 
   if (!info) {
-    if (!(s = GetTableShare(g, thd, db, name, mysql))) {
+		// Analyze the table name, it may have the format: [dbname.]tabname
+		if (strchr((char*)name, '.')) {
+			tn = (char*)PlugDup(g, name);
+			pn = strchr(tn, '.');
+			*pn++ = 0;
+			db = tn;
+			name = pn;
+		} // endif pn
+
+		if (!(s = GetTableShare(g, thd, db, name, mysql))) {
       return NULL;
     } else if (s->is_view) {
       strcpy(g->Message, "Use MYSQL type to see columns from a view");
@@ -315,7 +325,7 @@ bool PRXDEF::DefineAM(PGLOBAL g, LPCSTR, int)
       } // endif pn
 
   Tablep = new(g) XTAB(tab, def);
-  Tablep->SetQualifier(db);
+  Tablep->SetSchema(db);
   return false;
   } // end of DefineAM
 
@@ -347,7 +357,7 @@ TDBPRX::TDBPRX(PTDBPRX tdbp) : TDBASE(tdbp)
   } // end of TDBPRX copy constructor
 
 // Method
-PTDB TDBPRX::CopyOne(PTABS t)
+PTDB TDBPRX::Clone(PTABS t)
   {
   PTDB    tp;
   PPRXCOL cp1, cp2;
@@ -361,12 +371,12 @@ PTDB TDBPRX::CopyOne(PTABS t)
     } // endfor cp1
 
   return tp;
-  } // end of CopyOne
+  } // end of Clone
 
 /***********************************************************************/
 /*  Get the PTDB of the sub-table.                                     */
 /***********************************************************************/
-PTDBASE TDBPRX::GetSubTable(PGLOBAL g, PTABLE tabp, bool b)
+PTDB TDBPRX::GetSubTable(PGLOBAL g, PTABLE tabp, bool b)
   {
   const char  *sp = NULL;
   char        *db, *name;
@@ -379,12 +389,12 @@ PTDBASE TDBPRX::GetSubTable(PGLOBAL g, PTABLE tabp, bool b)
   LPCSTR       cdb, curdb = hc->GetDBName(NULL);
   THD         *thd = (hc->GetTable())->in_use;
 
-  db = (char*)tabp->GetQualifier();
+  db = (char*)(tabp->GetSchema() ? tabp->GetSchema() : curdb);
   name = (char*)tabp->GetName();
 
   // Check for eventual loop
   for (PTABLE tp = To_Table; tp; tp = tp->Next) {
-    cdb = (tp->Qualifier) ? tp->Qualifier : curdb;
+    cdb = (tp->Schema) ? tp->Schema : curdb;
 
     if (!stricmp(name, tp->Name) && !stricmp(db, cdb)) {
       sprintf(g->Message, "Table %s.%s pointing on itself", db, name);
@@ -423,7 +433,7 @@ PTDBASE TDBPRX::GetSubTable(PGLOBAL g, PTABLE tabp, bool b)
       } // endif Define
 
     if (db)
-      ((PTDBMY)tdbp)->SetDatabase(tabp->GetQualifier());
+      ((PTDBMY)tdbp)->SetDatabase(tabp->GetSchema());
 
     if (Mode == MODE_UPDATE || Mode == MODE_DELETE)
       tdbp->SetName(Name);      // For Make_Command
@@ -447,13 +457,13 @@ PTDBASE TDBPRX::GetSubTable(PGLOBAL g, PTABLE tabp, bool b)
 
   if (trace && tdbp)
     htrc("Subtable %s in %s\n", 
-          name, SVP(((PTDBASE)tdbp)->GetDef()->GetDB()));
+          name, SVP(tdbp->GetDef()->GetDB()));
  
  err:
   if (s)
     free_table_share(s);
 
-  return (PTDBASE)tdbp;
+  return tdbp;
   } // end of GetSubTable
 
 /***********************************************************************/
@@ -551,9 +561,9 @@ bool TDBPRX::OpenDB(PGLOBAL g)
   /*  its column blocks in mode write (required by XML tables).        */
   /*********************************************************************/
   if (Mode == MODE_UPDATE) {
-    PTDBASE utp;
+    PTDB utp;
 
-    if (!(utp= (PTDBASE)Tdbp->Duplicate(g))) {
+    if (!(utp= Tdbp->Duplicate(g))) {
       sprintf(g->Message, MSG(INV_UPDT_TABLE), Tdbp->GetName());
       return true;
       } // endif tp
@@ -672,7 +682,7 @@ char *PRXCOL::Decode(PGLOBAL g, const char *cnm)
 /*  PRXCOL initialization routine.                                     */
 /*  Look for the matching column in the object table.                  */
 /***********************************************************************/
-bool PRXCOL::Init(PGLOBAL g, PTDBASE tp)
+bool PRXCOL::Init(PGLOBAL g, PTDB tp)
   {
   if (!tp)
     tp = ((PTDBPRX)To_Tdb)->Tdbp;
@@ -757,7 +767,7 @@ void PRXCOL::WriteColumn(PGLOBAL g)
 /***********************************************************************/
 TDBTBC::TDBTBC(PPRXDEF tdp) : TDBCAT(tdp)
   {
-  Db  = (PSZ)tdp->Tablep->GetQualifier();    
+  Db  = (PSZ)tdp->Tablep->GetSchema();    
   Tab = (PSZ)tdp->Tablep->GetName();    
   } // end of TDBTBC constructor
 

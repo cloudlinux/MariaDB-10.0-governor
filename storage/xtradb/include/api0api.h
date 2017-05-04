@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2011, 2013, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2011, 2016, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -36,7 +36,7 @@ InnoDB Native API
 #endif
 
 #if defined(__GNUC__) && (__GNUC__ > 2) && ! defined(__INTEL_COMPILER)
-#define UNIV_NO_IGNORE		__attribute__ ((warn_unused_result))
+#define UNIV_NO_IGNORE		MY_ATTRIBUTE ((warn_unused_result))
 #else
 #define UNIV_NO_IGNORE
 #endif /* __GNUC__ && __GNUC__ > 2 && !__INTEL_COMPILER */
@@ -493,6 +493,14 @@ ib_trx_state_t
 ib_trx_state(
 /*=========*/
 	ib_trx_t	ib_trx);	/*!< in: trx handle */
+
+
+/*****************************************************************//**
+Check if the transaction is read_only */
+ib_u32_t
+ib_trx_read_only(
+/*=============*/
+        ib_trx_t        ib_trx);         /*!< in: trx handle */
 
 /*****************************************************************//**
 Release the resources of the transaction. If the transaction was

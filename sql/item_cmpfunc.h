@@ -1,7 +1,7 @@
 #ifndef ITEM_CMPFUNC_INCLUDED
 #define ITEM_CMPFUNC_INCLUDED
-/* Copyright (c) 2000, 2012, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2011, Monty Program Ab.
+/* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
+   Copyright (c) 2009, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -45,7 +45,6 @@ class Arg_comparator: public Sql_alloc
   Arg_comparator *comparators;   // used only for compare_row()
   double precision;
   /* Fields used in DATE/DATETIME comparison. */
-  THD *thd;
   Item *a_cache, *b_cache;         // Cached values of a and b items
                                    //   when one of arguments is NULL.
   int set_compare_func(Item_result_field *owner, Item_result type);
@@ -61,10 +60,10 @@ public:
   /* Allow owner function to use string buffers. */
   String value1, value2;
 
-  Arg_comparator():  set_null(TRUE), comparators(0), thd(0),
+  Arg_comparator():  set_null(TRUE), comparators(0),
     a_cache(0), b_cache(0) {};
   Arg_comparator(Item **a1, Item **a2): a(a1), b(a2),  set_null(TRUE),
-    comparators(0), thd(0), a_cache(0), b_cache(0) {};
+    comparators(0), a_cache(0), b_cache(0) {};
 
   int set_cmp_func(Item_result_field *owner_arg,
 			  Item **a1, Item **a2,
@@ -963,15 +962,13 @@ public:
 class in_datetime :public in_longlong
 {
 public:
-  THD *thd;
   /* An item used to issue warnings. */
   Item *warn_item;
   /* Cache for the left item. */
   Item *lval_cache;
 
   in_datetime(Item *warn_item_arg, uint elements)
-    :in_longlong(elements), thd(current_thd), warn_item(warn_item_arg),
-     lval_cache(0) {};
+    :in_longlong(elements), warn_item(warn_item_arg), lval_cache(0) {};
   void set(uint pos,Item *item);
   uchar *get_value(Item *item);
   Item* create_item()
@@ -1131,14 +1128,13 @@ class cmp_item_datetime :public cmp_item
 {
   longlong value;
 public:
-  THD *thd;
   /* Item used for issuing warnings. */
   Item *warn_item;
   /* Cache for the left item. */
   Item *lval_cache;
 
   cmp_item_datetime(Item *warn_item_arg)
-    :thd(current_thd), warn_item(warn_item_arg), lval_cache(0) {}
+    : warn_item(warn_item_arg), lval_cache(0) {}
   void store_value(Item *item);
   int cmp(Item *arg);
   int compare(cmp_item *ci);
@@ -1274,8 +1270,6 @@ public:
   Item *find_item(String *str);
   CHARSET_INFO *compare_collation() { return cmp_collation.collation; }
   void cleanup();
-  void agg_str_lengths(Item *arg);
-  void agg_num_lengths(Item *arg);
 };
 
 /*
@@ -1389,10 +1383,26 @@ public:
     update_used_tables();
   }
   const char *func_name() const { return "isnull"; }
+
+  bool arg_is_datetime_notnull_field()
+  {
+    Item **args= arguments();
+    if (args[0]->type() == Item::FIELD_ITEM)
+    {
+      Field *field=((Item_field*) args[0])->field;
+
+      if (((field->type() == MYSQL_TYPE_DATE) ||
+          (field->type() == MYSQL_TYPE_DATETIME)) &&
+          (field->flags & NOT_NULL_FLAG))
+        return true;
+    }
+    return false;
+  }
+
   /* Optimize case of not_null_column IS NULL */
   virtual void update_used_tables()
   {
-    if (!args[0]->maybe_null)
+    if (!args[0]->maybe_null && !arg_is_datetime_notnull_field())
     {
       used_tables_cache= 0;			/* is always false */
       const_item_cache= 1;

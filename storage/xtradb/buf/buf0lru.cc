@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2013, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -143,7 +143,7 @@ If a compressed page is freed other compressed pages may be relocated.
 caller needs to free the page to the free list
 @retval false if BUF_BLOCK_ZIP_PAGE was removed from page_hash. In
 this case the block is already returned to the buddy allocator. */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 bool
 buf_LRU_block_remove_hashed(
 /*========================*/
@@ -368,7 +368,7 @@ want to hog the CPU and resources. Release the buffer pool and block
 mutex and try to force a context switch. Then reacquire the same mutexes.
 The current page is "fixed" before the release of the mutexes and then
 "unfixed" again once we have reacquired the mutexes. */
-static	__attribute__((nonnull))
+static	MY_ATTRIBUTE((nonnull))
 void
 buf_flush_yield(
 /*============*/
@@ -407,7 +407,7 @@ If we have hogged the resources for too long then release the buffer
 pool and flush list mutex and do a thread yield. Set the current page
 to "sticky" so that it is not relocated during the yield.
 @return true if yielded */
-static	__attribute__((nonnull(1), warn_unused_result))
+static	MY_ATTRIBUTE((nonnull(1), warn_unused_result))
 bool
 buf_flush_try_yield(
 /*================*/
@@ -476,7 +476,7 @@ buf_flush_try_yield(
 Removes a single page from a given tablespace inside a specific
 buffer pool instance.
 @return true if page was removed. */
-static	__attribute__((nonnull, warn_unused_result))
+static	MY_ATTRIBUTE((nonnull, warn_unused_result))
 bool
 buf_flush_or_remove_page(
 /*=====================*/
@@ -578,7 +578,7 @@ the list as they age towards the tail of the LRU.
 @retval DB_SUCCESS if all freed
 @retval DB_FAIL if not all freed
 @retval DB_INTERRUPTED if the transaction was interrupted */
-static	__attribute__((nonnull(1), warn_unused_result))
+static	MY_ATTRIBUTE((nonnull(1), warn_unused_result))
 dberr_t
 buf_flush_or_remove_pages(
 /*======================*/
@@ -607,6 +607,7 @@ rescan:
 	     bpage != NULL;
 	     bpage = prev) {
 
+		ut_ad(!must_restart);
 		ut_a(buf_page_in_file(bpage));
 
 		/* Save the previous link because once we free the
@@ -624,9 +625,6 @@ rescan:
 
 			/* Remove was unsuccessful, we have to try again
 			by scanning the entire list from the end.
-			This also means that we never released the
-			flush list mutex. Therefore we can trust the prev
-			pointer.
 			buf_flush_or_remove_page() released the
 			flush list mutex but not the LRU list mutex.
 			Therefore it is possible that a new page was
@@ -643,6 +641,11 @@ rescan:
 			iteration. */
 
 			all_freed = false;
+			if (UNIV_UNLIKELY(must_restart)) {
+
+				/* Cannot trust the prev pointer */
+				break;
+			}
 		} else if (flush) {
 
 			/* The processing was successful. And during the
@@ -650,12 +653,9 @@ rescan:
 			when calling buf_page_flush(). We cannot trust
 			prev pointer. */
 			goto rescan;
-		} else if (UNIV_UNLIKELY(must_restart)) {
-
-			ut_ad(!all_freed);
-			break;
 		}
 
+		ut_ad(!must_restart);
 		++processed;
 
 		/* Yield if we have hogged the CPU and mutexes for too long. */
@@ -666,6 +666,11 @@ rescan:
 			/* Reset the batch size counter if we had to yield. */
 
 			processed = 0;
+		} else if (UNIV_UNLIKELY(must_restart)) {
+
+			/* Cannot trust the prev pointer */
+			all_freed = false;
+			break;
 		}
 
 #ifdef DBUG_OFF
@@ -694,7 +699,7 @@ Remove or flush all the dirty pages that belong to a given tablespace
 inside a specific buffer pool instance. The pages will remain in the LRU
 list and will be evicted from the LRU list as they age and move towards
 the tail of the LRU list. */
-static __attribute__((nonnull(1)))
+static MY_ATTRIBUTE((nonnull(1)))
 void
 buf_flush_dirty_pages(
 /*==================*/
@@ -734,7 +739,7 @@ buf_flush_dirty_pages(
 /******************************************************************//**
 Remove all pages that belong to a given tablespace inside a specific
 buffer pool instance when we are DISCARDing the tablespace. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 buf_LRU_remove_all_pages(
 /*=====================*/
@@ -890,7 +895,7 @@ buffer pool instance when we are deleting the data file(s) of that
 tablespace. The pages still remain a part of LRU and are evicted from
 the list as they age towards the tail of the LRU only if buf_remove
 is BUF_REMOVE_FLUSH_NO_WRITE. */
-static	__attribute__((nonnull(1)))
+static	MY_ATTRIBUTE((nonnull(1)))
 void
 buf_LRU_remove_pages(
 /*=================*/
@@ -1296,6 +1301,71 @@ buf_LRU_check_size_of_non_data_objects(
 	}
 }
 
+/** Diagnose failure to get a free page and request InnoDB monitor output in
+the error log if more than two seconds have been spent already.
+@param[in]	n_iterations	how many buf_LRU_get_free_page iterations
+                                already completed
+@param[in]	started_ms	timestamp in ms of when the attempt to get the
+                                free page started
+@param[in]	flush_failures	how many times single-page flush, if allowed,
+                                has failed
+@param[out]	mon_value_was	previous srv_print_innodb_monitor value
+@param[out]	started_monitor	whether InnoDB monitor print has been requested
+*/
+static
+void
+buf_LRU_handle_lack_of_free_blocks(ulint n_iterations, ulint started_ms,
+				   ulint flush_failures,
+				   ibool *mon_value_was,
+				   ibool *started_monitor)
+{
+	static ulint last_printout_ms = 0;
+
+	/* Legacy algorithm started warning after at least 2 seconds, we
+	emulate	this. */
+	const ulint current_ms = ut_time_ms();
+
+	if ((current_ms > started_ms + 2000)
+	    && (current_ms > last_printout_ms + 2000)) {
+
+		ut_print_timestamp(stderr);
+		fprintf(stderr,
+			"  InnoDB: Warning: difficult to find free blocks in\n"
+			"InnoDB: the buffer pool (%lu search iterations)!\n"
+			"InnoDB: %lu failed attempts to flush a page!"
+			" Consider\n"
+			"InnoDB: increasing the buffer pool size.\n"
+			"InnoDB: It is also possible that"
+			" in your Unix version\n"
+			"InnoDB: fsync is very slow, or"
+			" completely frozen inside\n"
+			"InnoDB: the OS kernel. Then upgrading to"
+			" a newer version\n"
+			"InnoDB: of your operating system may help."
+			" Look at the\n"
+			"InnoDB: number of fsyncs in diagnostic info below.\n"
+			"InnoDB: Pending flushes (fsync) log: %lu;"
+			" buffer pool: %lu\n"
+			"InnoDB: %lu OS file reads, %lu OS file writes,"
+			" %lu OS fsyncs\n"
+			"InnoDB: Starting InnoDB Monitor to print further\n"
+			"InnoDB: diagnostics to the standard output.\n",
+			(ulong) n_iterations,
+			(ulong)	flush_failures,
+			(ulong) fil_n_pending_log_flushes,
+			(ulong) fil_n_pending_tablespace_flushes,
+			(ulong) os_n_file_reads, (ulong) os_n_file_writes,
+			(ulong) os_n_fsyncs);
+
+		last_printout_ms = current_ms;
+		*mon_value_was = srv_print_innodb_monitor;
+		*started_monitor = TRUE;
+		srv_print_innodb_monitor = TRUE;
+		os_event_set(lock_sys->timeout_event);
+	}
+
+}
+
 /** The maximum allowed backoff sleep time duration, microseconds */
 #define MAX_FREE_LIST_BACKOFF_SLEEP 10000
 
@@ -1343,6 +1413,7 @@ buf_LRU_get_free_block(
 	ulint		flush_failures	= 0;
 	ibool		mon_value_was	= FALSE;
 	ibool		started_monitor	= FALSE;
+	ulint		started_ms	= 0;
 
 	ut_ad(!mutex_own(&buf_pool->LRU_list_mutex));
 
@@ -1351,7 +1422,24 @@ loop:
 	buf_LRU_check_size_of_non_data_objects(buf_pool);
 
 	/* If there is a block in the free list, take it */
-	block = buf_LRU_get_free_only(buf_pool);
+	if (DBUG_EVALUATE_IF("simulate_lack_of_pages", true, false)) {
+
+		block = NULL;
+
+		if (srv_debug_monitor_printed)
+			DBUG_SET("-d,simulate_lack_of_pages");
+
+	} else if (DBUG_EVALUATE_IF("simulate_recovery_lack_of_pages",
+				    recv_recovery_on, false)) {
+
+		block = NULL;
+
+		if (srv_debug_monitor_printed)
+			DBUG_SUICIDE();
+	} else {
+
+		block = buf_LRU_get_free_only(buf_pool);
+	}
 
 	if (block) {
 
@@ -1365,6 +1453,9 @@ loop:
 
 		return(block);
 	}
+
+	if (!started_ms)
+		started_ms = ut_time_ms();
 
 	if (srv_empty_free_list_algorithm == SRV_EMPTY_FREE_LIST_BACKOFF
 	    && buf_lru_manager_is_active
@@ -1403,11 +1494,17 @@ loop:
 				: FREE_LIST_BACKOFF_LOW_PRIO_DIVIDER));
 		}
 
-		/* In case of backoff, do not ever attempt single page flushes
-		and wait for the cleaner to free some pages instead.  */
+		buf_LRU_handle_lack_of_free_blocks(n_iterations, started_ms,
+						   flush_failures,
+						   &mon_value_was,
+						   &started_monitor);
 
 		n_iterations++;
 
+		srv_stats.buf_pool_wait_free.add(n_iterations, 1);
+
+		/* In case of backoff, do not ever attempt single page flushes
+		and wait for the cleaner to free some pages instead.  */
 		goto loop;
 	} else {
 
@@ -1439,6 +1536,12 @@ loop:
 
 	mutex_exit(&buf_pool->flush_state_mutex);
 
+	if (DBUG_EVALUATE_IF("simulate_recovery_lack_of_pages", true, false)
+	    || DBUG_EVALUATE_IF("simulate_lack_of_pages", true, false)) {
+
+		buf_pool->try_LRU_scan = false;
+	}
+
 	freed = FALSE;
 	if (buf_pool->try_LRU_scan || n_iterations > 0) {
 
@@ -1464,41 +1567,9 @@ loop:
 
 	}
 
-	if (n_iterations > 20) {
-		ut_print_timestamp(stderr);
-		fprintf(stderr,
-			"  InnoDB: Warning: difficult to find free blocks in\n"
-			"InnoDB: the buffer pool (%lu search iterations)!\n"
-			"InnoDB: %lu failed attempts to flush a page!"
-			" Consider\n"
-			"InnoDB: increasing the buffer pool size.\n"
-			"InnoDB: It is also possible that"
-			" in your Unix version\n"
-			"InnoDB: fsync is very slow, or"
-			" completely frozen inside\n"
-			"InnoDB: the OS kernel. Then upgrading to"
-			" a newer version\n"
-			"InnoDB: of your operating system may help."
-			" Look at the\n"
-			"InnoDB: number of fsyncs in diagnostic info below.\n"
-			"InnoDB: Pending flushes (fsync) log: %lu;"
-			" buffer pool: %lu\n"
-			"InnoDB: %lu OS file reads, %lu OS file writes,"
-			" %lu OS fsyncs\n"
-			"InnoDB: Starting InnoDB Monitor to print further\n"
-			"InnoDB: diagnostics to the standard output.\n",
-			(ulong) n_iterations,
-			(ulong)	flush_failures,
-			(ulong) fil_n_pending_log_flushes,
-			(ulong) fil_n_pending_tablespace_flushes,
-			(ulong) os_n_file_reads, (ulong) os_n_file_writes,
-			(ulong) os_n_fsyncs);
-
-		mon_value_was = srv_print_innodb_monitor;
-		started_monitor = TRUE;
-		srv_print_innodb_monitor = TRUE;
-		os_event_set(srv_monitor_event);
-	}
+	buf_LRU_handle_lack_of_free_blocks(n_iterations, started_ms,
+					   flush_failures, &mon_value_was,
+					   &started_monitor);
 
 	/* If we have scanned the whole LRU and still are unable to
 	find a free block then we should sleep here to let the

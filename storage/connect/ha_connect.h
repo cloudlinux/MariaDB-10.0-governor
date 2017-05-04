@@ -83,42 +83,9 @@ extern handlerton *connect_hton;
 
   These can be specified in the CREATE TABLE:
   CREATE TABLE ( ... ) {...here...}
-*/
-#if 0  // moved to mycat.h
-typedef struct ha_table_option_struct TOS, *PTOS;
 
-struct ha_table_option_struct {
-  const char *type;
-  const char *filename;
-  const char *optname;
-  const char *tabname;
-  const char *tablist;
-  const char *dbname;
-  const char *separator;
-//const char *connect;
-  const char *qchar;
-  const char *module;
-  const char *subtype;
-  const char *catfunc;
-  const char *srcdef;
-  const char *colist;
-  const char *oplist;
-  const char *data_charset;
-  ulonglong lrecl;
-  ulonglong elements;
-//ulonglong estimate;
-  ulonglong multiple;
-  ulonglong header;
-  ulonglong quoted;
-  ulonglong ending;
-  ulonglong compressed;
-  bool mapped;
-  bool huge;
-  bool split;
-  bool readonly;
-  bool sepindex;
-  };
-#endif // 0
+	------ Was moved to mycat.h ------
+	*/
 
 /**
   structure for CREATE TABLE options (field options)
@@ -241,11 +208,12 @@ public:
   int      MakeRecord(char *buf);
   int      ScanRecord(PGLOBAL g, uchar *buf);
   int      CheckRecord(PGLOBAL g, const uchar *oldbuf, uchar *newbuf);
-  int      ReadIndexed(uchar *buf, OPVAL op, const uchar* key= NULL,
-                                             uint key_len= 0);
+	int      ReadIndexed(uchar *buf, OPVAL op, const key_range *kr= NULL);
+	bool     IsIndexed(Field *fp);
   bool     MakeKeyWhere(PGLOBAL g, PSTRG qry, OPVAL op, char q,
-                                   const void *key, int klen);
-  inline char *Strz(LEX_STRING &ls); 
+                                   const key_range *kr);
+  inline char *Strz(LEX_STRING &ls);
+	key_range start_key;
 
 
   /** @brief
@@ -374,7 +342,7 @@ public:
    condition stack.
  */
 virtual const COND *cond_push(const COND *cond);
-PCFIL CheckCond(PGLOBAL g, PCFIL filp, AMT tty, Item *cond);
+PCFIL CheckCond(PGLOBAL g, PCFIL filp, const Item *cond);
 const char *GetValStr(OPVAL vop, bool neg);
 PFIL  CondFilter(PGLOBAL g, Item *cond);
 //PFIL  CheckFilter(PGLOBAL g);
@@ -535,7 +503,7 @@ private:
   DsMrr_impl ds_mrr;
 
 protected:
-  bool check_privileges(THD *thd, PTOS options, char *dbn);
+  bool check_privileges(THD *thd, PTOS options, char *dbn, bool quick=false);
   MODE CheckMode(PGLOBAL g, THD *thd, MODE newmode, bool *chk, bool *cras);
   char *GetDBfromName(const char *name);
 
@@ -553,7 +521,7 @@ protected:
   PVAL          sdvalin4;             // Used to convert date values
   PVAL          sdvalout;             // Used to convert date values
   bool          istable;              // True for table handler
-  char          partname[64];         // The partition name
+  char          partname[65];         // The partition name
   MODE          xmod;                 // Table mode
   XINFO         xinfo;                // The table info structure
   bool          valid_info;           // True if xinfo is valid

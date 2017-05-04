@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2015, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -93,7 +93,7 @@ fseg_n_reserved_pages_low(
 /********************************************************************//**
 Marks a page used. The page must reside within the extents of the given
 segment. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 fseg_mark_page_used(
 /*================*/
@@ -132,7 +132,7 @@ fsp_fill_free_list(
 	ulint		space,		/*!< in: space */
 	fsp_header_t*	header,		/*!< in/out: space header */
 	mtr_t*		mtr)		/*!< in/out: mini-transaction */
-	UNIV_COLD __attribute__((nonnull));
+	UNIV_COLD MY_ATTRIBUTE((nonnull));
 /**********************************************************************//**
 Allocates a single free page from a segment. This function implements
 the intelligent allocation strategy which tries to minimize file space
@@ -161,7 +161,7 @@ fseg_alloc_free_page_low(
 				in which the page should be initialized.
 				If init_mtr!=mtr, but the page is already
 				latched in mtr, do not initialize the page. */
-	__attribute__((warn_unused_result, nonnull));
+	MY_ATTRIBUTE((warn_unused_result, nonnull));
 #endif /* !UNIV_HOTBACKUP */
 
 /**********************************************************************//**
@@ -425,7 +425,7 @@ descriptor resides is x-locked. This function no longer extends the data
 file.
 @return pointer to the extent descriptor, NULL if the page does not
 exist in the space or if the offset is >= the free limit */
-UNIV_INLINE __attribute__((nonnull, warn_unused_result))
+UNIV_INLINE MY_ATTRIBUTE((nonnull, warn_unused_result))
 xdes_t*
 xdes_get_descriptor_with_space_hdr(
 /*===============================*/
@@ -487,7 +487,7 @@ is necessary to make the descriptor defined, as they are uninitialized
 above the free limit.
 @return pointer to the extent descriptor, NULL if the page does not
 exist in the space or if the offset exceeds the free limit */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 xdes_t*
 xdes_get_descriptor(
 /*================*/
@@ -614,7 +614,7 @@ byte*
 fsp_parse_init_file_page(
 /*=====================*/
 	byte*		ptr,	/*!< in: buffer */
-	byte*		end_ptr __attribute__((unused)), /*!< in: buffer end */
+	byte*		end_ptr MY_ATTRIBUTE((unused)), /*!< in: buffer end */
 	buf_block_t*	block)	/*!< in: block or NULL */
 {
 	ut_ad(ptr && end_ptr);
@@ -850,7 +850,7 @@ fsp_header_get_tablespace_size(void)
 Tries to extend a single-table tablespace so that a page would fit in the
 data file.
 @return	TRUE if success */
-static UNIV_COLD __attribute__((nonnull, warn_unused_result))
+static UNIV_COLD MY_ATTRIBUTE((nonnull, warn_unused_result))
 ibool
 fsp_try_extend_data_file_with_pages(
 /*================================*/
@@ -882,7 +882,7 @@ fsp_try_extend_data_file_with_pages(
 /***********************************************************************//**
 Tries to extend the last data file of a tablespace if it is auto-extending.
 @return	FALSE if not auto-extending */
-static UNIV_COLD __attribute__((nonnull))
+static UNIV_COLD MY_ATTRIBUTE((nonnull))
 ibool
 fsp_try_extend_data_file(
 /*=====================*/
@@ -952,10 +952,20 @@ fsp_try_extend_data_file(
 		}
 	} else {
 		/* We extend single-table tablespaces first one extent
-		at a time, but for bigger tablespaces more. It is not
-		enough to extend always by one extent, because some
-		extents are frag page extents. */
+		at a time, but 4 at a time for bigger tablespaces. It is
+		not enough to extend always by one extent, because we need
+		to add at least one extent to FSP_FREE.
+		A single extent descriptor page will track many extents.
+		And the extent that uses its extent descriptor page is
+		put onto the FSP_FREE_FRAG list. Extents that do not
+		use their extent descriptor page are added to FSP_FREE.
+		The physical page size is used to determine how many
+		extents are tracked on one extent descriptor page. */
 		ulint	extent_size;	/*!< one megabyte, in pages */
+		ulint	threshold;	/*!< The size of the tablespace
+					(in number of pages) where we
+					start allocating more than one
+					extent at a time. */
 
 		if (!zip_size) {
 			extent_size = FSP_EXTENT_SIZE;
@@ -963,6 +973,14 @@ fsp_try_extend_data_file(
 			extent_size = FSP_EXTENT_SIZE
 				* UNIV_PAGE_SIZE / zip_size;
 		}
+
+		/* Threshold is set at 32mb except when the page
+		size is small enough that it must be done sooner.
+		For page size less than 4k, we may reach the
+		extent contains extent descriptor page before
+		32 mb. */
+		threshold = ut_min((32 * extent_size),
+				   (zip_size ? zip_size : UNIV_PAGE_SIZE));
 
 		if (size < extent_size) {
 			/* Let us first extend the file to extent_size */
@@ -980,7 +998,7 @@ fsp_try_extend_data_file(
 			size = extent_size;
 		}
 
-		if (size < 32 * extent_size) {
+		if (size < threshold) {
 			size_increase = extent_size;
 		} else {
 			/* Below in fsp_fill_free_list() we assume
@@ -1046,7 +1064,6 @@ fsp_fill_free_list(
 	ulint	i;
 	mtr_t	ibuf_mtr;
 
-	ut_ad(header && mtr);
 	ut_ad(page_offset(header) == FSP_HEADER_OFFSET);
 
 	/* Check if we can fill free list from above the free list limit */
@@ -1218,7 +1235,7 @@ fsp_alloc_free_extent(
 
 /**********************************************************************//**
 Allocates a single free page from a space. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 fsp_alloc_from_free_frag(
 /*=====================*/
@@ -1309,7 +1326,7 @@ Allocates a single free page from a space. The page is marked as used.
 @retval block, rw_lock_x_lock_count(&block->lock) == 1 if allocation succeeded
 (init_mtr == mtr, or the page was not previously freed in mtr)
 @retval block (not allocated or initialized) otherwise */
-static __attribute__((nonnull, warn_unused_result))
+static MY_ATTRIBUTE((nonnull, warn_unused_result))
 buf_block_t*
 fsp_alloc_free_page(
 /*================*/
@@ -1328,9 +1345,6 @@ fsp_alloc_free_page(
 	ulint		free;
 	ulint		page_no;
 	ulint		space_size;
-
-	ut_ad(mtr);
-	ut_ad(init_mtr);
 
 	header = fsp_get_space_header(space, zip_size, mtr);
 
@@ -1558,9 +1572,9 @@ fsp_seg_inode_page_get_nth_inode(
 /*=============================*/
 	page_t*	page,	/*!< in: segment inode page */
 	ulint	i,	/*!< in: inode index on page */
-	ulint	zip_size __attribute__((unused)),
+	ulint	zip_size MY_ATTRIBUTE((unused)),
 			/*!< in: compressed page size, or 0 */
-	mtr_t*	mtr __attribute__((unused)))
+	mtr_t*	mtr MY_ATTRIBUTE((unused)))
 			/*!< in/out: mini-transaction */
 {
 	ut_ad(i < FSP_SEG_INODES_PER_PAGE(zip_size));
@@ -1859,7 +1873,7 @@ fseg_get_nth_frag_page_no(
 /*======================*/
 	fseg_inode_t*	inode,	/*!< in: segment inode */
 	ulint		n,	/*!< in: slot index */
-	mtr_t*		mtr __attribute__((unused)))
+	mtr_t*		mtr MY_ATTRIBUTE((unused)))
 				/*!< in/out: mini-transaction */
 {
 	ut_ad(inode && mtr);
@@ -2344,7 +2358,6 @@ fseg_alloc_free_page_low(
 	ibool		success;
 	ulint		n;
 
-	ut_ad(mtr);
 	ut_ad((direction >= FSP_UP) && (direction <= FSP_NO_DIR));
 	ut_ad(mach_read_from_4(seg_inode + FSEG_MAGIC_N)
 	      == FSEG_MAGIC_N_VALUE);
@@ -2715,6 +2728,8 @@ fsp_reserve_free_extents(
 	ulint		reserve;
 	ibool		success;
 	ulint		n_pages_added;
+	size_t		total_reserved = 0;
+	ulint		rounds = 0;
 
 	ut_ad(mtr);
 	*n_reserved = n_ext;
@@ -2780,9 +2795,11 @@ try_again:
 		}
 	} else {
 		ut_a(alloc_type == FSP_CLEANING);
+		reserve = 0;
 	}
 
 	success = fil_space_reserve_free_extents(space, n_free, n_ext);
+	*n_reserved = n_ext;
 
 	if (success) {
 		return(TRUE);
@@ -2790,7 +2807,18 @@ try_again:
 try_to_extend:
 	success = fsp_try_extend_data_file(&n_pages_added, space,
 					   space_header, mtr);
+
 	if (success && n_pages_added > 0) {
+
+		rounds++;
+		total_reserved += n_pages_added;
+
+		if (rounds > 50) {
+			ib_logf(IB_LOG_LEVEL_INFO,
+				"Space id %lu trying to reserve %lu extents actually reserved %lu "
+				" reserve %lu free %lu size %lu rounds %lu total_reserved %llu",
+				space, n_ext, n_pages_added, reserve, n_free, size, rounds, (ullint) total_reserved);
+		}
 
 		goto try_again;
 	}
@@ -2940,7 +2968,7 @@ fsp_get_available_space_in_free_extents(
 /********************************************************************//**
 Marks a page used. The page must reside within the extents of the given
 segment. */
-static __attribute__((nonnull))
+static MY_ATTRIBUTE((nonnull))
 void
 fseg_mark_page_used(
 /*================*/
@@ -3012,7 +3040,8 @@ fseg_free_page_low(
 	ib_id_t	seg_id;
 	ulint	i;
 
-	ut_ad(seg_inode && mtr);
+	ut_ad(seg_inode != NULL);
+	ut_ad(mtr != NULL);
 	ut_ad(mach_read_from_4(seg_inode + FSEG_MAGIC_N)
 	      == FSEG_MAGIC_N_VALUE);
 	ut_ad(!((page_offset(seg_inode) - FSEG_ARR_OFFSET) % FSEG_INODE_SIZE));
@@ -3221,7 +3250,8 @@ fseg_free_extent(
 	ulint	descr_n_used;
 	ulint	i;
 
-	ut_ad(seg_inode && mtr);
+	ut_ad(seg_inode != NULL);
+	ut_ad(mtr != NULL);
 
 	descr = xdes_get_descriptor(space, zip_size, page, mtr);
 

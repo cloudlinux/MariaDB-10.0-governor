@@ -9302,4 +9302,163 @@ CALL p1;
 DROP PROCEDURE p1;
 DROP TABLE t1;
 
+--echo #
+--echo # MDEV-10713: signal 11 error on multi-table update - crash in
+--echo # handler::increment_statistics or in make_select or assertion
+--echo # failure pfs_thread == ((PFS_thread*) pthread_getspecific((THR_PFS)))
+--echo #
+
+CREATE TABLE `t1` (
+  `CLOSE_YN` varchar(10) COLLATE utf8_bin DEFAULT NULL
+) DEFAULT CHARSET=utf8 COLLATE=utf8_bin ;
+
+
+CREATE TABLE `t2` (
+  `ap_close_to` varchar(8) COLLATE utf8_bin DEFAULT NULL
+) DEFAULT CHARSET=utf8 COLLATE=utf8_bin ;
+insert t1 values (1);
+
+
+--delimiter $$
+
+CREATE  FUNCTION `f1`(`P_DC_CD` VARBINARY(50), `P_SYS_DATE` DATETIME) RETURNS datetime
+    DETERMINISTIC
+    SQL SECURITY INVOKER
+BEGIN
+  DECLARE V_SYS_DATE DATETIME;
+  SELECT now() AS LOC_DATE INTO V_SYS_DATE ;
+  RETURN v_sys_date ;
+END $$
+
+--delimiter ;
+
+update t1 S
+JOIN
+(
+  SELECT CASE
+           WHEN DATE_FORMAT( f1('F01', NOW()) , '%Y%m%d') <= CLOSE_YMD
+             THEN '99991231'
+	     ELSE '' END ACCOUNT_APPLY_YYYYMMDD
+  FROM (
+        select case
+                 when 'AP'='AP'
+                   then ap_close_to
+                   end AS CLOSE_YMD
+	from t2
+       ) A
+) X
+SET S.CLOSE_YN = ''
+where 1=1;
+
+drop function if exists f1;
+drop table t1,t2;
+
 --echo # End of 5.5 test
+
+--echo #
+--echo #  MDEV-7040: Crash in field_conv, memcpy_field_possible, part#2
+--echo #
+create table t1 (
+  col1 bigint(20),
+  col2 char(1),
+  col3 char(2)
+);
+insert into t1 values (1,'a','a'), (2,'b','b');
+
+create table t2 as select * from t1;
+create table t3 as select * from t1;
+create table t4 as select * from t1;
+create table t5 as select * from t1;
+create table t6 as select * from t1;
+
+flush tables;
+
+DELIMITER |;
+
+CREATE PROCEDURE p1()
+begin
+   DECLARE _var1 bigint(20) UNSIGNED;
+   DECLARE _var2 CHAR(1) DEFAULT NULL;
+   DECLARE _var3 CHAR(1) DEFAULT NULL;
+
+   DECLARE _done BOOLEAN DEFAULT 0;
+
+   declare cur1 cursor for
+   select col1, col2, col3 
+   from t1 
+   where 
+     col1 in (select t2.col1 from t2 where t2.col2=t1.col2) or
+     col2 in (select t3.col3 from t3 where t3.col3=t1.col2) ;
+   
+   DECLARE CONTINUE HANDLER FOR NOT FOUND SET _done = 1;
+
+   OPEN cur1;
+   
+   set _var1 = (select _var1 from t4 limit 1);
+   set _var1 = (select _var1 from t5 limit 1);
+   set _var1 = (select _var1 from t6 limit 1);
+label1:
+   LOOP
+     SET _done = 0;
+     FETCH cur1 INTO _var1, _var2, _var3;
+     IF _done THEN
+         LEAVE label1;
+     END IF;
+   END LOOP label1;
+   CLOSE cur1;
+end|
+DELIMITER ;|
+
+set @tmp_toc= @@table_open_cache;
+set @tmp_tdc= @@table_definition_cache;
+
+set global table_open_cache=1;
+set global table_definition_cache=1;
+call p1();
+
+set global table_open_cache= @tmp_toc;
+set global table_definition_cache= @tmp_tdc;
+drop procedure p1;
+
+drop table t1,t2,t3,t4,t5,t6;
+
+--echo #
+--echo # MDEV-11935: Queries in stored procedures with and
+--echo # EXISTS(SELECT * FROM VIEW) crashes and closes hte conneciton.
+--echo #
+
+CREATE TABLE ANY_TABLE (
+  ENTITY_UID    BIGINT NOT NULL
+);
+CREATE TABLE SECURITY_PATH(
+origid BIGINT UNSIGNED NOT NULL,
+destid BIGINT UNSIGNED NOT NULL,
+KEY (destid)
+);
+CREATE VIEW ENTITY_ACCESS (
+ENTITY_UID,
+OWNER_UID
+) AS
+SELECT SP1.origid,
+       SP2.destid
+FROM SECURITY_PATH SP1
+JOIN SECURITY_PATH SP2 ON SP1.destid = SP2.origid
+;
+--delimiter //
+CREATE PROCEDURE SP_EXAMPLE_SELECT ()
+BEGIN
+   SELECT *
+   FROM ANY_TABLE AT1
+   WHERE EXISTS ( SELECT *
+                  FROM ENTITY_ACCESS EA
+                  WHERE AT1.ENTITY_UID = EA.ENTITY_UID
+                  AND   EA.OWNER_UID IS NULL );
+END
+//
+--delimiter ;
+CALL SP_EXAMPLE_SELECT ();
+CALL SP_EXAMPLE_SELECT ();
+
+drop procedure SP_EXAMPLE_SELECT;
+drop view ENTITY_ACCESS;
+drop table ANY_TABLE, SECURITY_PATH;

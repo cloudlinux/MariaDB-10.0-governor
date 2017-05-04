@@ -76,7 +76,8 @@ get_full_path ()
 
 me=`get_full_path $0`
 
-basedir='@prefix@'
+# Script might have been renamed but assume mysql_<something>config<something>
+basedir=`echo $me | sed -e 's;/bin/mysql_.*config.*;;'`
 
 ldata='@localstatedir@'
 execdir='@libexecdir@'

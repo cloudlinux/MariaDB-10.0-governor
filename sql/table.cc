@@ -1,4 +1,4 @@
-/* Copyright (c) 2000, 2014, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
    Copyright (c) 2008, 2015, MariaDB
 
    This program is free software; you can redistribute it and/or modify
@@ -19,7 +19,6 @@
 
 #include <my_global.h>                 /* NO_EMBEDDED_ACCESS_CHECKS */
 #include "sql_priv.h"
-#include "unireg.h"                    // REQUIRED: for other includes
 #include "table.h"
 #include "key.h"                                // find_ref_key
 #include "sql_table.h"                          // build_table_filename,
@@ -570,7 +569,7 @@ enum open_frm_error open_table_def(THD *thd, TABLE_SHARE *share, uint flags)
   {
     DBUG_ASSERT(flags & GTS_TABLE);
     DBUG_ASSERT(flags & GTS_USE_DISCOVERY);
-    mysql_file_delete_with_symlink(key_file_frm, path, MYF(0));
+    my_handler_delete_with_symlink(key_file_frm, path, "", MYF(0));
     file= -1;
   }
   else
@@ -2622,21 +2621,6 @@ enum open_frm_error open_table_from_share(THD *thd, TABLE_SHARE *share,
       outparam->record[1]= outparam->record[0];   // Safety
   }
 
-#ifdef HAVE_valgrind
-  /*
-    We need this because when we read var-length rows, we are not updating
-    bytes after end of varchar
-  */
-  if (records > 1)
-  {
-    memcpy(outparam->record[0], share->default_values, share->rec_buff_length);
-    memcpy(outparam->record[1], share->default_values, share->null_bytes);
-    if (records > 2)
-      memcpy(outparam->record[1], share->default_values,
-             share->rec_buff_length);
-  }
-#endif
-
   if (!(field_ptr = (Field **) alloc_root(&outparam->mem_root,
                                           (uint) ((share->fields+1)*
                                                   sizeof(Field*)))))
@@ -3400,18 +3384,23 @@ bool get_field(MEM_ROOT *mem, Field *field, String *res)
 {
   char buff[MAX_FIELD_WIDTH], *to;
   String str(buff,sizeof(buff),&my_charset_bin);
-  uint length;
+  bool rc;
+  THD *thd= field->get_thd();
+  ulonglong sql_mode_backup= thd->variables.sql_mode;
+  thd->variables.sql_mode&= ~MODE_PAD_CHAR_TO_FULL_LENGTH;
 
   field->val_str(&str);
-  if (!(length= str.length()))
+  if ((rc= !str.length() ||
+           !(to= strmake_root(mem, str.ptr(), str.length()))))
   {
     res->length(0);
-    return 1;
+    goto ex;
   }
-  if (!(to= strmake_root(mem, str.ptr(), length)))
-    length= 0;                                  // Safety fix
-  res->set(to, length, field->charset());
-  return 0;
+  res->set(to, str.length(), field->charset());
+
+ex:
+  thd->variables.sql_mode= sql_mode_backup;
+  return rc;
 }
 
 
@@ -3430,17 +3419,10 @@ bool get_field(MEM_ROOT *mem, Field *field, String *res)
 
 char *get_field(MEM_ROOT *mem, Field *field)
 {
-  char buff[MAX_FIELD_WIDTH], *to;
-  String str(buff,sizeof(buff),&my_charset_bin);
-  uint length;
-
-  field->val_str(&str);
-  length= str.length();
-  if (!length || !(to= (char*) alloc_root(mem,length+1)))
-    return NullS;
-  memcpy(to,str.ptr(),(uint) length);
-  to[length]=0;
-  return to;
+  String str;
+  bool rc= get_field(mem, field, &str);
+  DBUG_ASSERT(rc || str.ptr()[str.length()] == '\0');
+  return  rc ? NullS : (char *) str.ptr();
 }
 
 /*
@@ -5271,7 +5253,7 @@ Item *Field_iterator_table::create_item(THD *thd)
   if (item && thd->variables.sql_mode & MODE_ONLY_FULL_GROUP_BY &&
       !thd->lex->in_sum_func && select->cur_pos_in_select_list != UNDEF_POS)
   {
-    select->non_agg_fields.push_back(item);
+    select->join->non_agg_fields.push_back(item);
     item->marker= select->cur_pos_in_select_list;
     select->set_non_agg_field_used(true);
   }
@@ -5335,6 +5317,12 @@ Item *create_view_field(THD *thd, TABLE_LIST *view, Item **field_ref,
     item->maybe_null= TRUE;
   /* Save item in case we will need to fall back to materialization. */
   view->used_items.push_front(item);
+  /*
+    If we create this reference on persistent memory then it should be
+    present in persistent list
+  */
+  if (thd->mem_root == thd->stmt_arena->mem_root)
+    view->persistent_used_items.push_front(item);
   DBUG_RETURN(item);
 }
 
@@ -6698,11 +6686,9 @@ bool is_simple_order(ORDER *order)
   @details
     The function computes the values of the virtual columns of the table and
     stores them in the table record buffer.
-    If vcol_update_mode is set to VCOL_UPDATE_ALL then all virtual column are
-    computed. Otherwise, only fields from vcol_set are computed: all of them,
-    if vcol_update_mode is set to VCOL_UPDATE_FOR_WRITE, and, only those with
-    the stored_in_db flag set to false, if vcol_update_mode is equal to
-    VCOL_UPDATE_FOR_READ.
+    Only fields from vcol_set are computed: all of them, if vcol_update_mode is
+    set to VCOL_UPDATE_FOR_WRITE, and, only those with the stored_in_db flag
+    set to false, if vcol_update_mode is equal to VCOL_UPDATE_FOR_READ.
 
   @retval
     0    Success
@@ -6718,15 +6704,16 @@ int update_virtual_fields(THD *thd, TABLE *table,
   int error __attribute__ ((unused))= 0;
   DBUG_ASSERT(table && table->vfield);
 
-  thd->reset_arena_for_cached_items(table->expr_arena);
+  Query_arena backup_arena;
+  thd->set_n_backup_active_arena(table->expr_arena, &backup_arena);
+
   /* Iterate over virtual fields in the table */
   for (vfield_ptr= table->vfield; *vfield_ptr; vfield_ptr++)
   {
     vfield= (*vfield_ptr);
     DBUG_ASSERT(vfield->vcol_info && vfield->vcol_info->expr_item);
-    if ((bitmap_is_set(table->vcol_set, vfield->field_index) &&
-         (vcol_update_mode == VCOL_UPDATE_FOR_WRITE || !vfield->stored_in_db)) ||
-        vcol_update_mode == VCOL_UPDATE_ALL)
+    if (bitmap_is_set(table->vcol_set, vfield->field_index) &&
+        (vcol_update_mode == VCOL_UPDATE_FOR_WRITE || !vfield->stored_in_db))
     {
       /* Compute the actual value of the virtual fields */
       error= vfield->vcol_info->expr_item->save_in_field(vfield, 0);
@@ -6737,7 +6724,7 @@ int update_virtual_fields(THD *thd, TABLE *table,
       DBUG_PRINT("info", ("field '%s' - skipped", vfield->field_name));
     }
   }
-  thd->reset_arena_for_cached_items(0);
+  thd->restore_active_arena(table->expr_arena, &backup_arena);
   DBUG_RETURN(0);
 }
 
@@ -6912,6 +6899,7 @@ bool TABLE_LIST::handle_derived(LEX *lex, uint phases)
 {
   SELECT_LEX_UNIT *unit;
   DBUG_ENTER("handle_derived");
+  DBUG_PRINT("enter", ("phases: 0x%x", phases));
   if ((unit= get_unit()))
   {
     for (SELECT_LEX *sl= unit->first_select(); sl; sl= sl->next_select())

@@ -1,6 +1,7 @@
 /*****************************************************************************
 
-Copyright (c) 1995, 2014, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2017, MariaDB Corporation. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -206,7 +207,9 @@ struct fil_node_t {
 	ibool		open;	/*!< TRUE if file open */
 	os_file_t	handle;	/*!< OS handle to the file, if file open */
 	os_event_t	sync_event;/*!< Condition event to group and
-				serialize calls to fsync */
+				serialize calls to fsync;
+				os_event_set() and os_event_reset()
+				are protected by fil_system_t::mutex */
 	ibool		is_raw_disk;/*!< TRUE if the 'file' is actually a raw
 				device or a raw disk partition */
 	ulint		size;	/*!< size of the file in database pages, 0 if
@@ -415,7 +418,7 @@ fil_node_create(
 	ulint		id,	/*!< in: space id where to append */
 	ibool		is_raw)	/*!< in: TRUE if a raw device or
 				a raw disk partition */
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((nonnull, warn_unused_result));
 #ifdef UNIV_LOG_ARCHIVE
 /****************************************************************//**
 Drops files from the start of a file space, so that its size is cut by
@@ -582,7 +585,7 @@ fil_read_first_page(
 						lsn values in data files */
 	lsn_t*		max_flushed_lsn)	/*!< out: max of flushed
 						lsn values in data files */
-	__attribute__((warn_unused_result));
+	MY_ATTRIBUTE((warn_unused_result));
 /*******************************************************************//**
 Increments the count of pending operation, if space is not being deleted.
 @return	TRUE if being deleted, and operation should be skipped */
@@ -670,8 +673,23 @@ dberr_t
 fil_discard_tablespace(
 /*===================*/
 	ulint	id)	/*!< in: space id */
-	__attribute__((warn_unused_result));
+	MY_ATTRIBUTE((warn_unused_result));
 #endif /* !UNIV_HOTBACKUP */
+
+/** Test if a tablespace file can be renamed to a new filepath by checking
+if that the old filepath exists and the new filepath does not exist.
+@param[in]	space_id	tablespace id
+@param[in]	old_path	old filepath
+@param[in]	new_path	new filepath
+@param[in]	is_discarded	whether the tablespace is discarded
+@return innodb error code */
+dberr_t
+fil_rename_tablespace_check(
+	ulint		space_id,
+	const char*	old_path,
+	const char*	new_path,
+	bool		is_discarded);
+
 /*******************************************************************//**
 Renames a single-table tablespace. The tablespace must be cached in the
 tablespace memory cache.
@@ -764,7 +782,7 @@ fil_create_new_single_table_tablespace(
 	ulint		size)		/*!< in: the initial size of the
 					tablespace file in pages,
 					must be >= FIL_IBD_FILE_INITIAL_SIZE */
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((nonnull, warn_unused_result));
 #ifndef UNIV_HOTBACKUP
 /********************************************************************//**
 Tries to open a single-table tablespace and optionally checks the space id is
@@ -798,7 +816,7 @@ fil_open_single_table_tablespace(
 	const char*	tablename,	/*!< in: table name in the
 					databasename/tablename format */
 	const char*	filepath)	/*!< in: tablespace filepath */
-	__attribute__((nonnull(5), warn_unused_result));
+	MY_ATTRIBUTE((nonnull(5), warn_unused_result));
 
 #endif /* !UNIV_HOTBACKUP */
 /********************************************************************//**
@@ -947,7 +965,7 @@ fil_io(
 				appropriately aligned */
 	void*	message)	/*!< in: message for aio handler if non-sync
 				aio used, else ignored */
-	__attribute__((nonnull(8)));
+	MY_ATTRIBUTE((nonnull(8)));
 /**********************************************************************//**
 Waits for an aio operation to complete. This function is used to write the
 handler for completed requests. The aio array of pending requests is divided
@@ -1142,7 +1160,7 @@ fil_tablespace_iterate(
 	dict_table_t*		table,
 	ulint			n_io_buffers,
 	PageCallback&		callback)
-	__attribute__((nonnull, warn_unused_result));
+	MY_ATTRIBUTE((nonnull, warn_unused_result));
 
 /*******************************************************************//**
 Checks if a single-table tablespace for a given table name exists in the
@@ -1166,24 +1184,22 @@ fil_get_space_names(
 /*================*/
 	space_name_list_t&	space_name_list)
 				/*!< in/out: Vector for collecting the names. */
-	__attribute__((warn_unused_result));
+	MY_ATTRIBUTE((warn_unused_result));
 
-/****************************************************************//**
-Generate redo logs for swapping two .ibd files */
+/** Generate redo log for swapping two .ibd files
+@param[in]	old_table	old table
+@param[in]	new_table	new table
+@param[in]	tmp_name	temporary table name
+@param[in,out]	mtr		mini-transaction
+@return innodb error code */
 UNIV_INTERN
-void
+dberr_t
 fil_mtr_rename_log(
-/*===============*/
-	ulint		old_space_id,	/*!< in: tablespace id of the old
-					table. */
-	const char*	old_name,	/*!< in: old table name */
-	ulint		new_space_id,	/*!< in: tablespace id of the new
-					table */
-	const char*	new_name,	/*!< in: new table name */
-	const char*	tmp_name,	/*!< in: temp table name used while
-					swapping */
-	mtr_t*		mtr)		/*!< in/out: mini-transaction */
-	__attribute__((nonnull));
+	const dict_table_t*	old_table,
+	const dict_table_t*	new_table,
+	const char*		tmp_name,
+	mtr_t*			mtr)
+	MY_ATTRIBUTE((nonnull));
 
 /*******************************************************************//**
 Finds the given page_no of the given space id from the double write buffer,
@@ -1197,5 +1213,13 @@ fil_user_tablespace_restore_page(
 	ulint		page_no);	/* in: page_no to obtain from double
 					write buffer */
 
+/*******************************************************************//**
+Returns a pointer to the file_space_t that is in the memory cache
+associated with a space id.
+@return	file_space_t pointer, NULL if space not found */
+fil_space_t*
+fil_space_get(
+/*==========*/
+	ulint	id);	/*!< in: space id */
 #endif /* !UNIV_INNOCHECKSUM */
 #endif /* fil0fil_h */

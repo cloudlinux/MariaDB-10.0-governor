@@ -1,5 +1,5 @@
-/*
-   Copyright (c) 2000, 2010, Oracle and/or its affiliates.
+/* Copyright (c) 2000, 2016, Oracle and/or its affiliates.
+   Copyright (c) 2009, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -132,11 +132,11 @@ extern my_bool opt_replicate_annotate_row_events;
 extern ulonglong relay_log_space_limit;
 
 /*
-  3 possible values for Master_info::slave_running and
+  4 possible values for Master_info::slave_running and
   Relay_log_info::slave_running.
-  The values 0,1,2 are very important: to keep the diff small, I didn't
-  substitute places where we use 0/1 with the newly defined symbols. So don't change
-  these values.
+  The values 0,1,2,3 are very important: to keep the diff small, I didn't
+  substitute places where we use 0/1 with the newly defined symbols.
+  So don't change these values.
   The same way, code is assuming that in Relay_log_info we use only values
   0/1.
   I started with using an enum, but
@@ -145,6 +145,7 @@ extern ulonglong relay_log_space_limit;
 #define MYSQL_SLAVE_NOT_RUN         0
 #define MYSQL_SLAVE_RUN_NOT_CONNECT 1
 #define MYSQL_SLAVE_RUN_CONNECT     2
+#define MYSQL_SLAVE_RUN_READING     3
 
 #define RPL_LOG_NAME (rli->group_master_log_name[0] ? rli->group_master_log_name :\
  "FIRST")
@@ -212,13 +213,12 @@ bool rpl_master_erroneous_autoinc(THD* thd);
 const char *print_slave_db_safe(const char *db);
 void skip_load_data_infile(NET* net);
 
+void slave_prepare_for_shutdown();
 void end_slave(); /* release slave threads */
 void close_active_mi(); /* clean up slave threads data */
 void clear_until_condition(Relay_log_info* rli);
 void clear_slave_error(Relay_log_info* rli);
 void end_relay_log_info(Relay_log_info* rli);
-void lock_slave_threads(Master_info* mi);
-void unlock_slave_threads(Master_info* mi);
 void init_thread_mask(int* mask,Master_info* mi,bool inverse);
 Format_description_log_event *
 read_relay_log_description_event(IO_CACHE *cur_log, ulonglong start_pos,

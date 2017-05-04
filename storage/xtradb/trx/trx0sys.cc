@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 1996, 2013, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 1996, 2015, Oracle and/or its affiliates. All Rights Reserved.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -29,7 +29,10 @@ Created 3/26/1996 Heikki Tuuri
 #include "trx0sys.ic"
 #endif
 
-#ifndef UNIV_HOTBACKUP
+#ifdef UNIV_HOTBACKUP
+#include "fsp0types.h"
+
+#else	/* !UNIV_HOTBACKUP */
 #include "fsp0fsp.h"
 #include "mtr0log.h"
 #include "mtr0log.h"
@@ -1124,18 +1127,15 @@ trx_sys_read_pertable_file_format_id(
 	/* get the file format from the page */
 	ptr = page + 54;
 	flags = mach_read_from_4(ptr);
-	if (flags == 0) {
-		/* file format is Antelope */
-		*format_id = 0;
-		return(TRUE);
-	} else if (flags & 1) {
-		/* tablespace flags are ok */
-		*format_id = (flags / 32) % 128;
-		return(TRUE);
-	} else {
+
+	if (!fsp_flags_is_valid(flags) {
 		/* bad tablespace flags */
 		return(FALSE);
 	}
+
+	*format_id = FSP_FLAGS_GET_POST_ANTELOPE(flags);
+
+	return(TRUE);
 }
 
 
@@ -1196,12 +1196,12 @@ trx_sys_close(void)
 	/* Free the double write data structures. */
 	buf_dblwr_free();
 
-	mutex_enter(&trx_sys->mutex);
-
 	ut_a(UT_LIST_GET_LEN(trx_sys->ro_trx_list) == 0);
 
 	/* Only prepared transactions may be left in the system. Free them. */
-	ut_a(UT_LIST_GET_LEN(trx_sys->rw_trx_list) == trx_sys->n_prepared_trx);
+	ut_a(UT_LIST_GET_LEN(trx_sys->rw_trx_list) == trx_sys->n_prepared_trx
+	     || srv_read_only_mode
+	     || srv_force_recovery >= SRV_FORCE_NO_TRX_UNDO);
 
 	while ((trx = UT_LIST_GET_FIRST(trx_sys->rw_trx_list)) != NULL) {
 		trx_free_prepared(trx);
@@ -1237,8 +1237,6 @@ trx_sys_close(void)
 	ut_a(UT_LIST_GET_LEN(trx_sys->rw_trx_list) == 0);
 	ut_a(UT_LIST_GET_LEN(trx_sys->mysql_trx_list) == 0);
 
-	mutex_exit(&trx_sys->mutex);
-
 	mutex_free(&trx_sys->mutex);
 
 	ut_ad(trx_sys->descr_n_used == 0);
@@ -1249,6 +1247,33 @@ trx_sys_close(void)
 	trx_sys = NULL;
 }
 
+/** @brief Convert an undo log to TRX_UNDO_PREPARED state on shutdown.
+
+If any prepared ACTIVE transactions exist, and their rollback was
+prevented by innodb_force_recovery, we convert these transactions to
+XA PREPARE state in the main-memory data structures, so that shutdown
+will proceed normally. These transactions will again recover as ACTIVE
+on the next restart, and they will be rolled back unless
+innodb_force_recovery prevents it again.
+
+@param[in]	trx	transaction
+@param[in,out]	undo	undo log to convert to TRX_UNDO_PREPARED */
+static
+void
+trx_undo_fake_prepared(
+	const trx_t*	trx,
+	trx_undo_t*	undo)
+{
+	ut_ad(srv_force_recovery >= SRV_FORCE_NO_TRX_UNDO);
+	ut_ad(trx_state_eq(trx, TRX_STATE_ACTIVE));
+	ut_ad(trx->is_recovered);
+
+	if (undo != NULL) {
+		ut_ad(undo->state == TRX_UNDO_ACTIVE);
+		undo->state = TRX_UNDO_PREPARED;
+	}
+}
+
 /*********************************************************************
 Check if there are any active (non-prepared) transactions.
 @return total number of active transactions or 0 if none */
@@ -1257,15 +1282,42 @@ ulint
 trx_sys_any_active_transactions(void)
 /*=================================*/
 {
-	ulint	total_trx = 0;
-
 	mutex_enter(&trx_sys->mutex);
 
-	total_trx = UT_LIST_GET_LEN(trx_sys->rw_trx_list)
-		  + UT_LIST_GET_LEN(trx_sys->mysql_trx_list);
+	ulint	total_trx = UT_LIST_GET_LEN(trx_sys->mysql_trx_list);
 
-	ut_a(total_trx >= trx_sys->n_prepared_trx);
-	total_trx -= trx_sys->n_prepared_trx;
+	if (total_trx == 0) {
+		total_trx = UT_LIST_GET_LEN(trx_sys->rw_trx_list);
+		ut_a(total_trx >= trx_sys->n_prepared_trx);
+
+		if (total_trx > trx_sys->n_prepared_trx
+		    && srv_force_recovery >= SRV_FORCE_NO_TRX_UNDO) {
+			for (trx_t* trx = UT_LIST_GET_FIRST(
+				     trx_sys->rw_trx_list);
+			     trx != NULL;
+			     trx = UT_LIST_GET_NEXT(trx_list, trx)) {
+				if (!trx_state_eq(trx, TRX_STATE_ACTIVE)
+				    || !trx->is_recovered) {
+					continue;
+				}
+				/* This was a recovered transaction
+				whose rollback was disabled by
+				the innodb_force_recovery setting.
+				Pretend that it is in XA PREPARE
+				state so that shutdown will work. */
+				trx_undo_fake_prepared(
+					trx, trx->insert_undo);
+				trx_undo_fake_prepared(
+					trx, trx->update_undo);
+				trx->state = TRX_STATE_PREPARED;
+				trx_sys->n_prepared_trx++;
+				trx_sys->n_prepared_recovered_trx++;
+			}
+		}
+
+		ut_a(total_trx >= trx_sys->n_prepared_trx);
+		total_trx -= trx_sys->n_prepared_trx;
+	}
 
 	mutex_exit(&trx_sys->mutex);
 

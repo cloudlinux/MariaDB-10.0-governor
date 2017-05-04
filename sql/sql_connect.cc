@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2007, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2014, SkySQL Ab.
+   Copyright (c) 2008, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -28,7 +28,6 @@
 #include "sql_audit.h"
 #include "sql_connect.h"
 #include "probes_mysql.h"
-#include "unireg.h"                    // REQUIRED: for other includes
 #include "sql_parse.h"                          // sql_command_flags,
                                                 // execute_init_command,
                                                 // do_command
@@ -832,6 +831,7 @@ void update_global_user_stats(THD *thd, bool create_user, time_t now)
 
 bool thd_init_client_charset(THD *thd, uint cs_number)
 {
+  SV *gv=&global_system_variables;
   CHARSET_INFO *cs;
   /*
    Use server character set and collation if
@@ -842,12 +842,10 @@ bool thd_init_client_charset(THD *thd, uint cs_number)
   if (!opt_character_set_client_handshake ||
       !(cs= get_charset(cs_number, MYF(0))))
   {
-    thd->variables.character_set_client=
-      global_system_variables.character_set_client;
-    thd->variables.collation_connection=
-      global_system_variables.collation_connection;
-    thd->variables.character_set_results=
-      global_system_variables.character_set_results;
+    DBUG_ASSERT(is_supported_parser_charset(gv->character_set_client));
+    thd->variables.character_set_client= gv->character_set_client;
+    thd->variables.collation_connection= gv->collation_connection;
+    thd->variables.character_set_results= gv->character_set_results;
   }
   else
   {
@@ -1197,7 +1195,8 @@ void end_connection(THD *thd)
   }
 
   if (!thd->killed && (net->error && net->vio != 0))
-    thd->print_aborted_warning(1, ER(ER_UNKNOWN_ERROR));
+    thd->print_aborted_warning(1,
+      thd->get_stmt_da()->is_error() ? thd->get_stmt_da()->message() : ER(ER_UNKNOWN_ERROR));
 }
 
 
@@ -1287,7 +1286,6 @@ void prepare_new_connection_state(THD* thd)
 pthread_handler_t handle_one_connection(void *arg)
 {
   THD *thd= (THD*) arg;
-  thd->thread_tid_cll = gettid();
 
   mysql_thread_set_psi_id(thd->thread_id);
 

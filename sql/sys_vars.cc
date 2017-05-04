@@ -34,6 +34,7 @@
 #include "sql_plugin.h"                         // Includes my_global.h
 #include "sql_priv.h"
 #include "sql_class.h"                          // set_var.h: THD
+#include "sql_parse.h"
 #include "sys_vars.h"
 
 #include "events.h"
@@ -325,6 +326,14 @@ static Sys_var_long Sys_pfs_digest_size(
        DEFAULT(-1),
        BLOCK_SIZE(1));
 
+static Sys_var_long Sys_pfs_max_digest_length(
+       "performance_schema_max_digest_length",
+       "Maximum length considered for digest text, when stored in performance_schema tables.",
+       PARSED_EARLY READ_ONLY GLOBAL_VAR(pfs_param.m_max_digest_length),
+       CMD_LINE(REQUIRED_ARG), VALID_RANGE(0, 1024 * 1024),
+       DEFAULT(1024),
+       BLOCK_SIZE(1));
+
 static Sys_var_long Sys_pfs_connect_attrs_size(
        "performance_schema_session_connect_attrs_size",
        "Size of session attribute string buffer per thread."
@@ -605,7 +614,7 @@ static bool check_cs_client(sys_var *self, THD *thd, set_var *var)
     return true;
 
   // Currently, UCS-2 cannot be used as a client character set
-  if (((CHARSET_INFO *)(var->save_result.ptr))->mbminlen > 1)
+  if (!is_supported_parser_charset((CHARSET_INFO *)(var->save_result.ptr)))
     return true;
 
   return false;
@@ -807,30 +816,26 @@ static Sys_var_ulong Sys_delayed_queue_size(
        VALID_RANGE(1, UINT_MAX), DEFAULT(DELAYED_QUEUE_SIZE), BLOCK_SIZE(1));
 
 #ifdef HAVE_EVENT_SCHEDULER
-static const char *event_scheduler_names[]= { "OFF", "ON", "DISABLED", NullS };
+static const char *event_scheduler_names[]= { "OFF", "ON", "DISABLED",
+                                              "ORIGINAL", NullS };
 static bool event_scheduler_check(sys_var *self, THD *thd, set_var *var)
 {
-  /* DISABLED is only accepted on the command line */
-  if (var->save_result.ulonglong_value == Events::EVENTS_DISABLED)
-    return true;
-  /*
-    If the scheduler was disabled because there are no/bad
-    system tables, produce a more meaningful error message
-    than ER_OPTION_PREVENTS_STATEMENT
-  */
-  if (Events::check_if_system_tables_error())
-    return true;
   if (Events::opt_event_scheduler == Events::EVENTS_DISABLED)
   {
     my_error(ER_OPTION_PREVENTS_STATEMENT, MYF(0),
              "--event-scheduler=DISABLED or --skip-grant-tables");
     return true;
   }
+  /* DISABLED is only accepted on the command line */
+  if (var->save_result.ulonglong_value == Events::EVENTS_DISABLED)
+    return true;
   return false;
 }
+
 static bool event_scheduler_update(sys_var *self, THD *thd, enum_var_type type)
 {
   int err_no= 0;
+  bool ret;
   uint opt_event_scheduler_value= Events::opt_event_scheduler;
   mysql_mutex_unlock(&LOCK_global_system_variables);
   /*
@@ -849,9 +854,25 @@ static bool event_scheduler_update(sys_var *self, THD *thd, enum_var_type type)
     rare and it's difficult to avoid it without opening up possibilities
     for deadlocks. See bug#51160.
   */
-  bool ret= opt_event_scheduler_value == Events::EVENTS_ON
-            ? Events::start(&err_no)
-            : Events::stop();
+
+  /* EVENTS_ORIGINAL means we should revert back to the startup state */
+  if (opt_event_scheduler_value == Events::EVENTS_ORIGINAL)
+  {
+    opt_event_scheduler_value= Events::opt_event_scheduler=
+      Events::startup_state;
+  }
+ 
+  /*
+    If the scheduler was not properly inited (because of wrong system tables),
+    try to init it again. This is needed for mysql_upgrade to work properly if
+    the event tables where upgraded.
+  */
+  if (!Events::inited && (Events::init(thd, 0) || !Events::inited))
+    ret= 1;
+  else
+    ret= opt_event_scheduler_value == Events::EVENTS_ON ?
+      Events::start(&err_no) :
+      Events::stop();
   mysql_mutex_lock(&LOCK_global_system_variables);
   if (ret)
   {
@@ -1315,7 +1336,7 @@ static Sys_var_ulong Sys_max_connect_errors(
 
 static Sys_var_long Sys_max_digest_length(
        "max_digest_length", "Maximum length considered for digest text.",
-       PARSED_EARLY READ_ONLY GLOBAL_VAR(max_digest_length),
+       READ_ONLY GLOBAL_VAR(max_digest_length),
        CMD_LINE(REQUIRED_ARG),
        VALID_RANGE(0, 1024 * 1024), DEFAULT(1024), BLOCK_SIZE(1));
 
@@ -1506,7 +1527,6 @@ bool
 Sys_var_gtid_slave_pos::do_check(THD *thd, set_var *var)
 {
   String str, *res;
-  bool running;
 
   DBUG_ASSERT(var->type == OPT_GLOBAL);
 
@@ -1517,10 +1537,7 @@ Sys_var_gtid_slave_pos::do_check(THD *thd, set_var *var)
     return true;
   }
 
-  mysql_mutex_lock(&LOCK_active_mi);
-  running= master_info_index->give_error_if_slave_running();
-  mysql_mutex_unlock(&LOCK_active_mi);
-  if (running)
+  if (give_error_if_slave_running(0))
     return true;
   if (!(res= var->value->val_str(&str)))
     return true;
@@ -1558,7 +1575,7 @@ Sys_var_gtid_slave_pos::global_update(THD *thd, set_var *var)
 
   mysql_mutex_unlock(&LOCK_global_system_variables);
   mysql_mutex_lock(&LOCK_active_mi);
-  if (master_info_index->give_error_if_slave_running())
+  if (give_error_if_slave_running(1))
     err= true;
   else
     err= rpl_gtid_pos_update(thd, var->save_result.string_value.str,
@@ -1584,7 +1601,7 @@ Sys_var_gtid_slave_pos::global_value_ptr(THD *thd, LEX_STRING *base)
     But if the table is not loaded (eg. missing mysql_upgrade_db or some such),
     then the slave state must be empty anyway.
   */
-  if ((rpl_global_gtid_slave_state.loaded &&
+  if ((rpl_global_gtid_slave_state->loaded &&
        rpl_append_gtid_state(&str, false)) ||
       !(p= thd->strmake(str.ptr(), str.length())))
   {
@@ -1744,15 +1761,7 @@ Sys_var_last_gtid::session_value_ptr(THD *thd, LEX_STRING *base)
 static bool
 check_slave_parallel_threads(sys_var *self, THD *thd, set_var *var)
 {
-  bool running;
-
-  mysql_mutex_lock(&LOCK_active_mi);
-  running= master_info_index->give_error_if_slave_running();
-  mysql_mutex_unlock(&LOCK_active_mi);
-  if (running)
-    return true;
-
-  return false;
+  return give_error_if_slave_running(0);
 }
 
 static bool
@@ -1761,9 +1770,7 @@ fix_slave_parallel_threads(sys_var *self, THD *thd, enum_var_type type)
   bool err;
 
   mysql_mutex_unlock(&LOCK_global_system_variables);
-  mysql_mutex_lock(&LOCK_active_mi);
-  err= master_info_index->give_error_if_slave_running();
-  mysql_mutex_unlock(&LOCK_active_mi);
+  err= give_error_if_slave_running(0);
   mysql_mutex_lock(&LOCK_global_system_variables);
 
   return err;
@@ -1786,15 +1793,7 @@ static Sys_var_ulong Sys_slave_parallel_threads(
 static bool
 check_slave_domain_parallel_threads(sys_var *self, THD *thd, set_var *var)
 {
-  bool running;
-
-  mysql_mutex_lock(&LOCK_active_mi);
-  running= master_info_index->give_error_if_slave_running();
-  mysql_mutex_unlock(&LOCK_active_mi);
-  if (running)
-    return true;
-
-  return false;
+  return give_error_if_slave_running(0);
 }
 
 static bool
@@ -1803,12 +1802,10 @@ fix_slave_domain_parallel_threads(sys_var *self, THD *thd, enum_var_type type)
   bool running;
 
   mysql_mutex_unlock(&LOCK_global_system_variables);
-  mysql_mutex_lock(&LOCK_active_mi);
-  running= master_info_index->give_error_if_slave_running();
-  mysql_mutex_unlock(&LOCK_active_mi);
+  running= give_error_if_slave_running(0);
   mysql_mutex_lock(&LOCK_global_system_variables);
 
-  return running ? true : false;
+  return running;
 }
 
 
@@ -1839,15 +1836,7 @@ static Sys_var_ulong Sys_slave_parallel_max_queued(
 static bool
 check_gtid_ignore_duplicates(sys_var *self, THD *thd, set_var *var)
 {
-  bool running;
-
-  mysql_mutex_lock(&LOCK_active_mi);
-  running= master_info_index->give_error_if_slave_running();
-  mysql_mutex_unlock(&LOCK_active_mi);
-  if (running)
-    return true;
-
-  return false;
+  return give_error_if_slave_running(0);
 }
 
 static bool
@@ -1856,12 +1845,10 @@ fix_gtid_ignore_duplicates(sys_var *self, THD *thd, enum_var_type type)
   bool running;
 
   mysql_mutex_unlock(&LOCK_global_system_variables);
-  mysql_mutex_lock(&LOCK_active_mi);
-  running= master_info_index->give_error_if_slave_running();
-  mysql_mutex_unlock(&LOCK_active_mi);
+  running= give_error_if_slave_running(0);
   mysql_mutex_lock(&LOCK_global_system_variables);
 
-  return running ? true : false;
+  return running;
 }
 
 
@@ -2809,10 +2796,8 @@ Sys_var_replicate_events_marked_for_skip::global_update(THD *thd, set_var *var)
   DBUG_ENTER("Sys_var_replicate_events_marked_for_skip::global_update");
 
   mysql_mutex_unlock(&LOCK_global_system_variables);
-  mysql_mutex_lock(&LOCK_active_mi);
-  if (!master_info_index->give_error_if_slave_running())
+  if (!give_error_if_slave_running(0))
     result= Sys_var_enum::global_update(thd, var);
-  mysql_mutex_unlock(&LOCK_active_mi);
   mysql_mutex_lock(&LOCK_global_system_variables);
   DBUG_RETURN(result);
 }
@@ -3271,7 +3256,7 @@ static Sys_var_charptr Sys_version_compile_machine(
        "version_compile_machine", "version_compile_machine",
        READ_ONLY SHOW_VALUE_IN_HELP
        GLOBAL_VAR(server_version_compile_machine_ptr), NO_CMD_LINE,
-       IN_SYSTEM_CHARSET, DEFAULT(MACHINE_TYPE));
+       IN_SYSTEM_CHARSET, DEFAULT(DEFAULT_MACHINE));
 
 static char *server_version_compile_os_ptr;
 static Sys_var_charptr Sys_version_compile_os(
@@ -3812,14 +3797,16 @@ static bool check_log_path(sys_var *self, THD *thd, set_var *var)
   if (!var->save_result.string_value.str)
     return true;
 
-  if (var->save_result.string_value.length > FN_REFLEN)
+  LEX_STRING *val= &var->save_result.string_value;
+
+  if (val->length > FN_REFLEN)
   { // path is too long
     my_error(ER_PATH_LENGTH, MYF(0), self->name.str);
     return true;
   }
 
   char path[FN_REFLEN];
-  size_t path_length= unpack_filename(path, var->save_result.string_value.str);
+  size_t path_length= unpack_filename(path, val->str);
 
   if (!path_length)
     return true;
@@ -3832,6 +3819,17 @@ static bool check_log_path(sys_var *self, THD *thd, set_var *var)
      return true;
   }
 
+  static const LEX_CSTRING my_cnf= { STRING_WITH_LEN("my.cnf") };
+  static const LEX_CSTRING my_ini= { STRING_WITH_LEN("my.ini") };
+  if (path_length >= my_cnf.length)
+  {
+    if (strcasecmp(path + path_length - my_cnf.length, my_cnf.str) == 0)
+      return true; // log file name ends with "my.cnf"
+    DBUG_ASSERT(my_cnf.length == my_ini.length);
+    if (strcasecmp(path + path_length - my_ini.length, my_ini.str) == 0)
+      return true; // log file name ends with "my.ini"
+  }
+
   MY_STAT f_stat;
 
   if (my_stat(path, &f_stat, MYF(0)))
@@ -3841,9 +3839,9 @@ static bool check_log_path(sys_var *self, THD *thd, set_var *var)
     return false;
   }
 
-  (void) dirname_part(path, var->save_result.string_value.str, &path_length);
+  (void) dirname_part(path, val->str, &path_length);
 
-  if (var->save_result.string_value.length - path_length >= FN_LEN)
+  if (val->length - path_length >= FN_LEN)
   { // filename is too long
       my_error(ER_PATH_LENGTH, MYF(0), self->name.str);
       return true;
@@ -4071,19 +4069,16 @@ bool Sys_var_rpl_filter::global_update(THD *thd, set_var *var)
   Master_info *mi;
 
   mysql_mutex_unlock(&LOCK_global_system_variables);
-  mysql_mutex_lock(&LOCK_active_mi);
   
   if (!var->base.length) // no base name
   {
-    mi= master_info_index->
-      get_master_info(&thd->variables.default_master_connection,
-                      Sql_condition::WARN_LEVEL_ERROR);
+    mi= get_master_info(&thd->variables.default_master_connection,
+                        Sql_condition::WARN_LEVEL_ERROR);
   }
   else // has base name
   {
-    mi= master_info_index->
-      get_master_info(&var->base, 
-                      Sql_condition::WARN_LEVEL_WARN);
+    mi= get_master_info(&var->base, 
+                        Sql_condition::WARN_LEVEL_WARN);
   }
 
   if (mi)
@@ -4091,17 +4086,17 @@ bool Sys_var_rpl_filter::global_update(THD *thd, set_var *var)
     if (mi->rli.slave_running)
     {
       my_error(ER_SLAVE_MUST_STOP, MYF(0), 
-          mi->connection_name.length,
-          mi->connection_name.str);
+               mi->connection_name.length,
+               mi->connection_name.str);
       result= true;
     }
     else
     {
       result= set_filter_value(var->save_result.string_value.str, mi);
     }
+    mi->release();
   }
 
-  mysql_mutex_unlock(&LOCK_active_mi);
   mysql_mutex_lock(&LOCK_global_system_variables);
   return result;
 }
@@ -4109,8 +4104,10 @@ bool Sys_var_rpl_filter::global_update(THD *thd, set_var *var)
 bool Sys_var_rpl_filter::set_filter_value(const char *value, Master_info *mi)
 {
   bool status= true;
-  Rpl_filter* rpl_filter= mi ? mi->rpl_filter : global_rpl_filter;
+  Rpl_filter* rpl_filter= mi->rpl_filter;
 
+  /* Proctect against other threads */
+  mysql_mutex_lock(&LOCK_active_mi);
   switch (opt_id) {
   case OPT_REPLICATE_DO_DB:
     status= rpl_filter->set_do_db(value);
@@ -4131,7 +4128,7 @@ bool Sys_var_rpl_filter::set_filter_value(const char *value, Master_info *mi)
     status= rpl_filter->set_wild_ignore_table(value);
     break;
   }
-
+  mysql_mutex_unlock(&LOCK_active_mi);
   return status;
 }
 
@@ -4144,29 +4141,24 @@ uchar *Sys_var_rpl_filter::global_value_ptr(THD *thd, LEX_STRING *base)
   Rpl_filter *rpl_filter;
 
   mysql_mutex_unlock(&LOCK_global_system_variables);
-  mysql_mutex_lock(&LOCK_active_mi);
   if (!base->length) // no base name
   {
-    mi= master_info_index->
-      get_master_info(&thd->variables.default_master_connection,
-                      Sql_condition::WARN_LEVEL_ERROR);
+    mi= get_master_info(&thd->variables.default_master_connection,
+                        Sql_condition::WARN_LEVEL_ERROR);
   }
   else // has base name
-  {
-    mi= master_info_index->
-      get_master_info(base, 
-                      Sql_condition::WARN_LEVEL_WARN);
-  }
-  mysql_mutex_lock(&LOCK_global_system_variables);
+    mi= get_master_info(base, Sql_condition::WARN_LEVEL_WARN);
 
   if (!mi)
   {
-    mysql_mutex_unlock(&LOCK_active_mi);
+    mysql_mutex_lock(&LOCK_global_system_variables);
     return 0;
   }
+
   rpl_filter= mi->rpl_filter;
   tmp.length(0);
 
+  mysql_mutex_lock(&LOCK_active_mi);
   switch (opt_id) {
   case OPT_REPLICATE_DO_DB:
     rpl_filter->get_do_db(&tmp);
@@ -4187,9 +4179,12 @@ uchar *Sys_var_rpl_filter::global_value_ptr(THD *thd, LEX_STRING *base)
     rpl_filter->get_wild_ignore_table(&tmp);
     break;
   }
+  mysql_mutex_unlock(&LOCK_active_mi);
+  mysql_mutex_lock(&LOCK_global_system_variables);
+
+  mi->release();
 
   ret= (uchar *) thd->strmake(tmp.ptr(), tmp.length());
-  mysql_mutex_unlock(&LOCK_active_mi);
 
   return ret;
 }
@@ -4260,17 +4255,12 @@ get_master_info_ulonglong_value(THD *thd, ptrdiff_t offset)
   Master_info *mi;
   ulonglong res= 0;                                  // Default value
   mysql_mutex_unlock(&LOCK_global_system_variables);
-  mysql_mutex_lock(&LOCK_active_mi);
-  mi= master_info_index->
-    get_master_info(&thd->variables.default_master_connection,
-                    Sql_condition::WARN_LEVEL_WARN);
-  if (mi)
+  if ((mi= get_master_info(&thd->variables.default_master_connection,
+                           Sql_condition::WARN_LEVEL_WARN)))
   {
-    mysql_mutex_lock(&mi->rli.data_lock);
     res= *((ulonglong*) (((uchar*) mi) + master_info_offset));
-    mysql_mutex_unlock(&mi->rli.data_lock);
+    mi->release();
   }
-  mysql_mutex_unlock(&LOCK_active_mi);    
   mysql_mutex_lock(&LOCK_global_system_variables);
   return res;
 }
@@ -4285,19 +4275,16 @@ bool update_multi_source_variable(sys_var *self_var, THD *thd,
 
   if (type == OPT_GLOBAL)
     mysql_mutex_unlock(&LOCK_global_system_variables);
-  mysql_mutex_lock(&LOCK_active_mi);
-  mi= master_info_index->
-    get_master_info(&thd->variables.default_master_connection,
-                    Sql_condition::WARN_LEVEL_ERROR);
-  if (mi)
+  if ((mi= (get_master_info(&thd->variables.default_master_connection,
+                            Sql_condition::WARN_LEVEL_ERROR))))
   {
     mysql_mutex_lock(&mi->rli.run_lock);
     mysql_mutex_lock(&mi->rli.data_lock);
     result= self->update_variable(thd, mi);
     mysql_mutex_unlock(&mi->rli.data_lock);
     mysql_mutex_unlock(&mi->rli.run_lock);
+    mi->release();
   }
-  mysql_mutex_unlock(&LOCK_active_mi);
   if (type == OPT_GLOBAL)
     mysql_mutex_lock(&LOCK_global_system_variables);
   return result;
@@ -4311,6 +4298,28 @@ static bool update_slave_skip_counter(sys_var *self, THD *thd, Master_info *mi)
              mi->connection_name.str);
     return true;
   }
+  if (mi->using_gtid != Master_info::USE_GTID_NO && mi->using_parallel())
+  {
+    ulong domain_count;
+    mysql_mutex_lock(&rpl_global_gtid_slave_state->LOCK_slave_state);
+    domain_count= rpl_global_gtid_slave_state->count();
+    mysql_mutex_unlock(&rpl_global_gtid_slave_state->LOCK_slave_state);
+    if (domain_count > 1)
+    {
+      /*
+        With domain-based parallel replication, the slave position is
+        multi-dimensional, so the relay log position is not very meaningful.
+        It might not even correspond to the next GTID to execute in _any_
+        domain (the case after error stop). So slave_skip_counter will most
+        likely not do what the user intends. Instead give an error, with a
+        suggestion to instead set @@gtid_slave_pos past the point of error;
+        this works reliably also in the case of multiple domains.
+      */
+      my_error(ER_SLAVE_SKIP_NOT_IN_GTID, MYF(0));
+      return true;
+    }
+  }
+
   /* The value was stored temporarily in thd */
   mi->rli.slave_skip_counter= thd->variables.slave_skip_counter;
   return false;

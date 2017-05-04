@@ -36,22 +36,22 @@ struct show_table_contributors_st {
 */
 
 struct show_table_contributors_st show_table_contributors[]= {
-  /* MariaDB foundation members, in contribution, size , time order */
-  {"Booking.com", "http://www.booking.com", "Founding member of the MariaDB foundation"},
-  {"SkySQL Ab", "http://www.skysql.com", "Founding member of the MariaDB foundation"},
-  {"Auttomatic", "http://automattic.com", "Member of the MariaDB foundation"},  
-  {"Parallels", "http://www.parallels.com/products/plesk", "Founding member of the MariaDB foundation"},
-
-  /* Smaller sponsors, newer per year */
-  {"Verkkokauppa.com", "Finland", "Sponsor of the MariaDB foundation"},
-  {"Webyog", "Bangalor", "Sponsor of the MariaDB foundation"},
-  {"Percona", "USA", "Sponsor of the MariaDB foundation"},
-  {"Jelastic.com", "Russia", "Sponsor of the MariaDB foundation"},
-  {"Planetta.net", "Finland", "Sponsor of the MariaDB foundation"},
-  {"Open query", "Australia", "Sponsor of the MariaDB foundation"},
+  /* MariaDB foundation sponsors, in contribution, size , time order */
+  {"Booking.com", "https://www.booking.com", "Founding member, Platinum Sponsor of the MariaDB Foundation"},
+  {"Alibaba Cloud", "https://intl.aliyun.com", "Platinum Sponsor of the MariaDB Foundation"},
+  {"MariaDB Corporation", "https://mariadb.com", "Founding member, Gold Sponsor of the MariaDB Foundation"},
+  {"Visma", "https://visma.com", "Gold Sponsor of the MariaDB Foundation"},
+  {"DBS", "https://dbs.com", "Gold Sponsor of the MariaDB Foundation"},
+  {"Nexedi", "https://www.nexedi.com", "Silver Sponsor of the MariaDB Foundation"},
+  {"Acronis", "http://www.acronis.com", "Silver Sponsor of the MariaDB Foundation"},
+  {"Auttomattic", "https://automattic.com", "Bronze Sponsor of the MariaDB Foundation"},
+  {"Verkkokauppa.com", "https://www.verkkokauppa.com", "Bronze Sponsor of the MariaDB Foundation"},
+  {"Virtuozzo", "https://virtuozzo.com", "Bronze Sponsor of the MariaDB Foundation"},
+  {"Tencent Game DBA", "http://tencentdba.com/about", "Bronze Sponsor of the MariaDB Foundation"},
+  {"Tencent TDSQL", "http://tdsql.org", "Bronze Sponsor of the MariaDB Foundation"},
 
   /* Sponsors of important features */
-  {"Google", "USA", "Sponsoring parallel replication and GTID" },
+  {"Google", "USA", "Sponsoring encryption, parallel replication and GTID"},
   {"Facebook", "USA", "Sponsoring non-blocking API, LIMIT ROWS EXAMINED etc"},
 
   /* Individual contributors, names in historical order, newer first */

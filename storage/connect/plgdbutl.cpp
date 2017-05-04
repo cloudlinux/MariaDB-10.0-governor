@@ -1,11 +1,11 @@
 /********** PlgDBUtl Fpe C++ Program Source Code File (.CPP) ***********/
 /* PROGRAM NAME: PLGDBUTL                                              */
 /* -------------                                                       */
-/*  Version 3.9                                                        */
+/*  Version 4.0                                                        */
 /*                                                                     */
 /* COPYRIGHT:                                                          */
 /* ----------                                                          */
-/*  (C) Copyright to the author Olivier BERTRAND          1998-2015    */
+/*  (C) Copyright to the author Olivier BERTRAND          1998-2017    */
 /*                                                                     */
 /* WHAT THIS PROGRAM DOES:                                             */
 /* -----------------------                                             */
@@ -46,9 +46,9 @@
 #else     // !__WIN__
 #include <unistd.h>
 #include <fcntl.h>
-#if defined(THREAD)
+//#if defined(THREAD)
 #include <pthread.h>
-#endif   // THREAD
+//#endif   // THREAD
 #include <stdarg.h>
 #define BIGMEM      2147483647            // Max int value
 #endif    // !__WIN__
@@ -68,17 +68,9 @@
 #include "tabcol.h"    // header of XTAB and COLUMN classes
 #include "valblk.h"
 #include "rcmsg.h"
-
-/***********************************************************************/
-/*  Macro or external routine definition                               */
-/***********************************************************************/
-#if defined(THREAD)
-#if defined(__WIN__)
-extern CRITICAL_SECTION parsec;      // Used calling the Flex parser
-#else   // !__WIN__
-extern pthread_mutex_t parmut;
-#endif  // !__WIN__
-#endif  //  THREAD
+#ifdef ZIP_SUPPORT
+#include "filamzip.h"
+#endif   // ZIP_SUPPORT
 
 /***********************************************************************/
 /*  DB static variables.                                               */
@@ -89,6 +81,12 @@ bool  plugin = false;  // True when called by the XDB plugin handler
 extern "C" {
 extern char version[];
 } // extern "C"
+
+#if defined(__WIN__)
+extern CRITICAL_SECTION parsec;      // Used calling the Flex parser
+#else   // !__WIN__
+extern pthread_mutex_t parmut;
+#endif  // !__WIN__
 
 // The debug trace used by the main thread
        FILE *pfile = NULL;
@@ -679,7 +677,8 @@ void PlugConvertConstant(PGLOBAL g, void* & value, short& type)
 /*  non quoted blanks are not included in the output format.           */
 /***********************************************************************/
 PDTP MakeDateFormat(PGLOBAL g, PSZ dfmt, bool in, bool out, int flag)
-  {
+{
+	int  rc;
   PDTP pdp = (PDTP)PlugSubAlloc(g, NULL, sizeof(DATPAR));
 
   if (trace)
@@ -701,26 +700,27 @@ PDTP MakeDateFormat(PGLOBAL g, PSZ dfmt, bool in, bool out, int flag)
   /* Call the FLEX generated parser. In multi-threading mode the next  */
   /* instruction is included in an Enter/LeaveCriticalSection bracket. */
   /*********************************************************************/
-#if defined(THREAD)
+	//#if defined(THREAD)
 #if defined(__WIN__)
   EnterCriticalSection((LPCRITICAL_SECTION)&parsec);
 #else   // !__WIN__
   pthread_mutex_lock(&parmut);
 #endif  // !__WIN__
-#endif  //  THREAD
-  /*int rc =*/ fmdflex(pdp);
-#if defined(THREAD)
+//#endif  //  THREAD
+  rc = fmdflex(pdp);
+//#if defined(THREAD)
 #if defined(__WIN__)
   LeaveCriticalSection((LPCRITICAL_SECTION)&parsec);
 #else   // !__WIN__
   pthread_mutex_unlock(&parmut);
 #endif  // !__WIN__
-#endif  //  THREAD
+//#endif  //  THREAD
 
   if (trace)
-    htrc("Done:  in=%s out=%s\n", SVP(pdp->InFmt), SVP(pdp->OutFmt));           
+    htrc("Done: in=%s out=%s rc=%d\n", SVP(pdp->InFmt), SVP(pdp->OutFmt), rc);
+
   return pdp;
-  } // end of MakeDateFormat
+} // end of MakeDateFormat
 
 /***********************************************************************/
 /* Extract the date from a formatted string according to format.       */
@@ -937,7 +937,20 @@ int PlugCloseFile(PGLOBAL g __attribute__((unused)), PFBLOCK fp, bool all)
       CloseXML2File(g, fp, all);
       break;
 #endif   // LIBXML2_SUPPORT
-    default:
+#ifdef ZIP_SUPPORT
+		case TYPE_FB_ZIP:
+			if (fp->Mode == MODE_INSERT)
+				((ZIPUTIL*)fp->File)->close();
+			else
+				((UNZIPUTL*)fp->File)->close();
+
+			fp->Memory = NULL;
+			fp->Mode = MODE_ANY;
+			fp->Count = 0;
+			fp->File = NULL;
+			break;
+#endif   // ZIP_SUPPORT
+		default:
       rc = RC_FX;
     } // endswitch Type
 
@@ -1100,7 +1113,8 @@ char *GetAmName(PGLOBAL g, AMT am, void *memp)
     case TYPE_AM_DOM:   strcpy(amn, "DOM");   break;
     case TYPE_AM_DIR:   strcpy(amn, "DIR");   break;
     case TYPE_AM_ODBC:  strcpy(amn, "ODBC");  break;
-    case TYPE_AM_MAC:   strcpy(amn, "MAC");   break;
+		case TYPE_AM_JDBC:  strcpy(amn, "JDBC");  break;
+		case TYPE_AM_MAC:   strcpy(amn, "MAC");   break;
     case TYPE_AM_OEM:   strcpy(amn, "OEM");   break;
     case TYPE_AM_OUT:   strcpy(amn, "OUT");   break;
     default:           sprintf(amn, "OEM(%d)", am);
@@ -1109,7 +1123,7 @@ char *GetAmName(PGLOBAL g, AMT am, void *memp)
   return amn;
   } // end of GetAmName
 
-#if defined(__WIN__) && !defined(NOCATCH)
+#if defined(SE_CATCH)
 /***********************************************************************/
 /*  GetExceptionDesc: return the description of an exception code.     */
 /***********************************************************************/
@@ -1197,7 +1211,7 @@ char *GetExceptionDesc(PGLOBAL g, unsigned int e)
 
   return p;
   } // end of GetExceptionDesc
-#endif   // __WIN__ && !NOCATCH
+#endif   // SE_CATCH
 
 /***********************************************************************/
 /*  PlgDBalloc: allocates or suballocates memory conditionally.        */

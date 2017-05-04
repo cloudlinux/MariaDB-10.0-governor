@@ -20,35 +20,36 @@ SET(CONNECT_SOURCES
 ha_connect.cc connect.cc user_connect.cc mycat.cc
 fmdlex.c osutil.c plugutil.c rcmsg.c rcmsg.h
 array.cpp blkfil.cpp colblk.cpp csort.cpp
-filamap.cpp filamdbf.cpp filamfix.cpp filamtxt.cpp filamvct.cpp filamzip.cpp
+filamap.cpp filamdbf.cpp filamfix.cpp filamgz.cpp filamtxt.cpp
 filter.cpp json.cpp jsonudf.cpp maputil.cpp myconn.cpp myutil.cpp plgdbutl.cpp
-reldef.cpp tabcol.cpp tabdos.cpp tabfix.cpp tabfmt.cpp tabjson.cpp table.cpp
-tabmul.cpp tabmysql.cpp taboccur.cpp tabpivot.cpp tabsys.cpp tabtbl.cpp tabutil.cpp
-tabvct.cpp tabvir.cpp tabxcl.cpp valblk.cpp value.cpp xindex.cpp xobject.cpp
+reldef.cpp tabcol.cpp tabdos.cpp tabext.cpp tabfix.cpp tabfmt.cpp tabjson.cpp
+table.cpp tabmul.cpp tabmysql.cpp taboccur.cpp tabpivot.cpp tabsys.cpp tabtbl.cpp
+tabutil.cpp tabvir.cpp tabxcl.cpp valblk.cpp value.cpp xindex.cpp xobject.cpp
 
 array.h blkfil.h block.h catalog.h checklvl.h colblk.h connect.h csort.h
-engmsg.h filamap.h filamdbf.h filamfix.h filamtxt.h filamvct.h filamzip.h
-filter.h global.h ha_connect.h inihandl.h json.h maputil.h msgid.h mycat.h
-myconn.h myutil.h os.h osutil.h plgcnx.h plgdbsem.h preparse.h reldef.h
-resource.h tabcol.h tabdos.h tabfix.h tabfmt.h tabjson.h tabmul.h tabmysql.h
-taboccur.h tabpivot.h tabsys.h tabtbl.h tabutil.h tabvct.h tabvir.h tabxcl.h
+engmsg.h filamap.h filamdbf.h filamfix.h filamgz.h filamtxt.h
+filter.h global.h ha_connect.h inihandl.h json.h jsonudf.h maputil.h msgid.h
+mycat.h myconn.h myutil.h os.h osutil.h plgcnx.h plgdbsem.h preparse.h reldef.h
+resource.h tabcol.h tabdos.h tabext.h tabfix.h tabfmt.h tabjson.h tabmul.h
+tabmysql.h taboccur.h tabpivot.h tabsys.h tabtbl.h tabutil.h tabvir.h tabxcl.h
 user_connect.h valblk.h value.h xindex.h xobject.h xtable.h)
 
 #
 # Definitions that are shared for all OSes
 #
-add_definitions( -DMARIADB -DFORCE_INIT_OF_VARS )
-add_definitions( -DHUGE_SUPPORT -DZIP_SUPPORT -DPIVOT_SUPPORT )
+add_definitions( -DMARIADB -DFORCE_INIT_OF_VARS -Dconnect_EXPORTS)
+add_definitions( -DHUGE_SUPPORT -DGZ_SUPPORT -DPIVOT_SUPPORT )
 
 
 #
 # OS specific C flags, definitions and source files.
 #
 IF(UNIX)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   # Bar: -Wfatal-errors removed (does not present in gcc on solaris10)
   if(WITH_WARNINGS)
     add_definitions(-Wall -Wextra -Wmissing-declarations)
-    message(STATUS "CONNECT: GCC: All warnings enabled")
+    #message(STATUS "CONNECT: GCC: All warnings enabled")
   else()
     add_definitions(-Wall -Wmissing-declarations)
     add_definitions(-Wno-write-strings)
@@ -69,8 +70,9 @@ IF(UNIX)
 # These switches are for C++ only
 #   add_definitions(-Wno-reorder)
 
-    message(STATUS "CONNECT: GCC: Some warnings disabled")
+    #message(STATUS "CONNECT: GCC: Some warnings disabled")
   endif(WITH_WARNINGS)
+  endif()
 
   add_definitions( -DUNIX -DLINUX -DUBUNTU )
 
@@ -85,6 +87,18 @@ ELSE(NOT UNIX)
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /EHsc")
   SET(IPHLPAPI_LIBRARY iphlpapi.lib)
 ENDIF(UNIX)
+
+
+#
+# VCT: the VEC format might be not supported in future versions
+#
+
+OPTION(CONNECT_WITH_VCT "Compile CONNECT storage engine with VCT support" ON)
+
+IF(CONNECT_WITH_VCT)
+  SET(CONNECT_SOURCES ${CONNECT_SOURCES} filamvct.cpp tabvct.cpp filamvct.h tabvct.h)
+  add_definitions(-DVCT_SUPPORT)
+ENDIF(CONNECT_WITH_VCT)
 
 
 #
@@ -126,37 +140,10 @@ IF(WIN32)
 
   OPTION(CONNECT_WITH_MSXML "Compile CONNECT storage engine with MSXML support" ON)
   IF(CONNECT_WITH_MSXML)
-    find_library(MSXML_LIBRARY
-    NAMES msxml6 msxml4 msxml3 msxml2
-    PATHS
-    "C:/Program Files/Microsoft SDKs/Windows/v7.0A/Lib"
-    "C:/Program Files/Microsoft SDKs/Windows/v6.0A/Lib"
-    "C:/Program Files (x86)/Microsoft SDKs/Windows/v7.0A/Lib"
-    DOC "Specify the MSXML? library here."
-    )
-    IF(MSXML_LIBRARY MATCHES .*msxml6[.].*)
-      add_definitions(-DMSX6 -DDOMDOC_SUPPORT)
-      message(STATUS "MSXML library version: msxml6")
-      SET(MSXML_FOUND 1)
-      SET(CONNECT_SOURCES ${CONNECT_SOURCES} domdoc.cpp domdoc.h)
-    ELSEIF(MSXML_LIBRARY MATCHES .*msxml4[.].*)
-      add_definitions(-DMSX4 -DDOMDOC_SUPPORT)
-      message("MSXML library version: msxml4")
-      SET(MSXML_FOUND 1)
-      SET(CONNECT_SOURCES ${CONNECT_SOURCES} domdoc.cpp domdoc.h)
-    ELSEIF(MSXML_LIBRARY MATCHES .*msxml3[.].*)
-      message("MSXML library version: msxml3")
-      add_definitions(-DMSX3 -DDOMDOC_SUPPORT)
-      SET(MSXML_FOUND 1)
-      SET(CONNECT_SOURCES ${CONNECT_SOURCES} domdoc.cpp domdoc.h)
-    ELSEIF(MSXML_LIBRARY MATCHES .*msxml2[.].*)
-      message("MSXML library version: msxml2")
-      add_definitions(-DMXS2 -DDOMDOC_SUPPORT)
-      SET(MSXML_FOUND 1)
-      SET(CONNECT_SOURCES ${CONNECT_SOURCES} domdoc.cpp domdoc.h)
-    ELSE()
-      message(STATUS "msxml? library not found")
-    ENDIF()
+    add_definitions(-DMSX6 -DDOMDOC_SUPPORT)
+    message(STATUS "MSXML library version: msxml6")
+    SET(MSXML_FOUND 1)
+    SET(CONNECT_SOURCES ${CONNECT_SOURCES} domdoc.cpp domdoc.h)
   ENDIF(CONNECT_WITH_MSXML)
 ENDIF(WIN32)
 
@@ -257,6 +244,53 @@ int main() {
   ENDIF(UNIX)
 ENDIF(CONNECT_WITH_ODBC)
 
+#
+# JDBC
+#
+IF(APPLE)
+  OPTION(CONNECT_WITH_JDBC "Compile CONNECT storage engine without JDBC support" OFF)
+ELSE()
+  OPTION(CONNECT_WITH_JDBC "Compile CONNECT storage engine with JDBC support" ON)
+ENDIF()
+
+IF(CONNECT_WITH_JDBC)
+  FIND_PACKAGE(Java 1.6)
+  FIND_PACKAGE(JNI)
+  IF (JAVA_FOUND AND JNI_FOUND)
+    INCLUDE(UseJava)
+    INCLUDE_DIRECTORIES(${JAVA_INCLUDE_PATH})
+    INCLUDE_DIRECTORIES(${JAVA_INCLUDE_PATH2})
+    # SET(JDBC_LIBRARY ${JAVA_JVM_LIBRARY}) will be dynamically linked
+    SET(CONNECT_SOURCES ${CONNECT_SOURCES}
+    jdbconn.cpp tabjdbc.cpp jdbconn.h tabjdbc.h jdbccat.h
+    JdbcInterface.java ApacheInterface.java MariadbInterface.java
+    MysqlInterface.java OracleInterface.java PostgresqlInterface.java
+    JavaWrappers.jar)
+    # TODO: Find how to compile and install the java wrapper classes
+    # Find required libraries and include directories
+    SET (JAVA_SOURCES JdbcInterface.java)
+    add_jar(JdbcInterface ${JAVA_SOURCES})
+    install_jar(JdbcInterface DESTINATION ${INSTALL_PLUGINDIR} COMPONENT connect-engine)
+    INSTALL(FILES ${CMAKE_CURRENT_SOURCE_DIR}/JavaWrappers.jar
+      DESTINATION ${INSTALL_PLUGINDIR} COMPONENT connect-engine)
+    add_definitions(-DJDBC_SUPPORT)
+  ELSE()
+    SET(JDBC_LIBRARY "")
+  ENDIF()
+ENDIF(CONNECT_WITH_JDBC)
+
+#
+# ZIP
+#
+
+OPTION(CONNECT_WITH_ZIP "Compile CONNECT storage engine with ZIP support" ON)
+
+IF(CONNECT_WITH_ZIP)
+  SET(CONNECT_SOURCES ${CONNECT_SOURCES} filamzip.cpp tabzip.cpp unzip.c ioapi.c zip.c
+    filamzip.h tabzip.h ioapi.h unzip.h zip.h)
+  add_definitions(-DZIP_SUPPORT -DNOCRYPT)
+ENDIF(CONNECT_WITH_ZIP)
+
 
 #
 # XMAP
@@ -277,5 +311,5 @@ MYSQL_ADD_PLUGIN(connect ${CONNECT_SOURCES}
   COMPONENT connect-engine
   RECOMPILE_FOR_EMBEDDED
   LINK_LIBRARIES ${ZLIB_LIBRARY} ${XML_LIBRARY} ${ICONV_LIBRARY}
-                 ${ODBC_LIBRARY} ${IPHLPAPI_LIBRARY})
+                 ${ODBC_LIBRARY} ${JDBC_LIBRARY} ${IPHLPAPI_LIBRARY})
 

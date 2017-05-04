@@ -46,7 +46,7 @@ IF (WIN32)
 ENDIF()
 
 IF(UNIX)
- SET (MYSYS_SOURCES ${MYSYS_SOURCES} my_addr_resolve.c)
+ SET (MYSYS_SOURCES ${MYSYS_SOURCES} my_addr_resolve.c my_setuser.c)
 ENDIF()
 
 IF(HAVE_ALARM)
@@ -69,7 +69,7 @@ ENDIF()
 
 ADD_CONVENIENCE_LIBRARY(mysys ${MYSYS_SOURCES})
 TARGET_LINK_LIBRARIES(mysys dbug strings ${ZLIB_LIBRARY} 
- ${LIBNSL} ${LIBM} ${LIBRT} ${LIBSOCKET} ${LIBEXECINFO} dl)
+ ${LIBNSL} ${LIBM} ${LIBRT} ${LIBSOCKET} ${LIBEXECINFO})
 DTRACE_INSTRUMENT(mysys)
 
 IF(HAVE_BFD_H)
@@ -82,7 +82,7 @@ ENDIF(WIN32)
 
 # Need explicit pthread for gcc -fsanitize=address
 IF(CMAKE_USE_PTHREADS_INIT AND CMAKE_C_FLAGS MATCHES "-fsanitize=")
-  TARGET_LINK_LIBRARIES(mysys pthread dl)
+  TARGET_LINK_LIBRARIES(mysys pthread)
 ENDIF()
 
 ADD_EXECUTABLE(thr_lock thr_lock.c)

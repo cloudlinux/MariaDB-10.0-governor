@@ -67,7 +67,7 @@ IF(UNIX)
   ENDFOREACH()
   IF(INSTALL_SUPPORTFILESDIR)
     INSTALL(FILES magic DESTINATION ${inst_location} COMPONENT SupportFiles)
-    INSTALL(DIRECTORY RHEL4-SElinux/ DESTINATION ${inst_location}/SELinux/RHEL4 COMPONENT SupportFiles)
+    ADD_SUBDIRECTORY(SELinux)
   ENDIF()
 
   INSTALL(FILES mysql.m4 DESTINATION ${INSTALL_SHAREDIR}/aclocal COMPONENT Development)
@@ -112,8 +112,6 @@ IF(UNIX)
               COMPONENT SharedLibraries)
       INSTALL(FILES rpm/mysql-clients.cnf DESTINATION ${INSTALL_SYSCONF2DIR}
               COMPONENT Client)
-      CONFIGURE_FILE(${CMAKE_CURRENT_SOURCE_DIR}/rpm/server.cnf 
-                     ${CMAKE_CURRENT_BINARY_DIR}/rpm/server.cnf @ONLY )
       INSTALL(FILES rpm/server.cnf DESTINATION ${INSTALL_SYSCONF2DIR}
               COMPONENT IniFiles)
     ENDIF()

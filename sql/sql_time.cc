@@ -19,7 +19,6 @@
 
 #include <my_global.h>
 #include "sql_priv.h"
-#include "unireg.h"                      // REQUIRED by other includes
 #include "sql_time.h"
 #include "tztime.h"                      // struct Time_zone
 #include "sql_class.h"                   // THD
@@ -931,7 +930,10 @@ bool date_add_interval(MYSQL_TIME *ltime, interval_type int_type,
     my_bool neg= 0;
     enum enum_mysql_timestamp_type time_type= ltime->time_type;
 
-    if ((ulong) interval.day > MAX_DAY_NUMBER)
+    if (((ulonglong) interval.day +
+         (ulonglong) interval.hour / 24 +
+         (ulonglong) interval.minute / 24 / 60 +
+         (ulonglong) interval.second / 24 / 60 / 60) > MAX_DAY_NUMBER)
       goto invalid_date;
 
     if (time_type != MYSQL_TIMESTAMP_TIME)
@@ -1329,7 +1331,7 @@ time_to_datetime_with_warn(THD *thd,
     only in the old mode.
   */
   if (time_to_datetime(thd, from, to) ||
-      ((thd->variables.old_behavior && OLD_MODE_ZERO_DATE_TIME_CAST) &&
+      ((thd->variables.old_behavior & OLD_MODE_ZERO_DATE_TIME_CAST) &&
         check_date(to, fuzzydate, &warn)))
   {
     ErrConvTime str(from);

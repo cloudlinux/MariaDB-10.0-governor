@@ -2,7 +2,7 @@
 #define SQL_ITEM_INCLUDED
 
 /* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2015, MariaDB
+   Copyright (c) 2009, 2016, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -25,7 +25,6 @@
 #include "sql_priv.h"                /* STRING_BUFFER_USUAL_SIZE */
 #include "unireg.h"
 #include "sql_const.h"                 /* RAND_TABLE_BIT, MAX_FIELD_NAME */
-#include "unireg.h"                    // REQUIRED: for other includes
 #include "thr_malloc.h"                         /* sql_calloc */
 #include "field.h"                              /* Derivation */
 
@@ -524,7 +523,7 @@ public:
 
     RETURN
       FALSE if parameter value has been set,
-      TRUE if error has occured.
+      TRUE if error has occurred.
   */
   virtual bool set_value(THD *thd, sp_rcontext *ctx, Item **it)= 0;
 
@@ -657,7 +656,7 @@ public:
   */
   uint name_length;                     /* Length of name */
   uint decimals;
-  int8 marker;
+  int  marker;
   bool maybe_null;			/* If item may be null */
   bool in_rollup;                       /* If used in GROUP BY list
                                            of a query with ROLLUP */ 
@@ -2364,7 +2363,7 @@ public:
     max_length= 0;
     name= name_par ? name_par : (char*) "NULL";
     fixed= 1;
-    collation.set(cs, DERIVATION_IGNORABLE);
+    collation.set(cs, DERIVATION_IGNORABLE, MY_REPERTOIRE_ASCII);
   }
   enum Type type() const { return NULL_ITEM; }
   bool eq(const Item *item, bool binary_cmp) const { return null_eq(item); }
@@ -2514,7 +2513,7 @@ public:
 
   /*
     If value for parameter was not set we treat it as non-const
-    so noone will use parameters value in fix_fields still
+    so no one will use parameters value in fix_fields still
     parameter is constant during execution.
   */
   virtual table_map used_tables() const
@@ -3356,6 +3355,7 @@ class Item_ref :public Item_ident
 {
 protected:
   void set_properties();
+  bool set_properties_only; // the item doesn't need full fix_fields
 public:
   enum Ref_Type { REF, DIRECT_REF, VIEW_REF, OUTER_REF, AGGREGATE_REF };
   Field *result_field;			 /* Save result here */
@@ -3365,7 +3365,7 @@ public:
            const char *db_arg, const char *table_name_arg,
            const char *field_name_arg)
     :Item_ident(context_arg, db_arg, table_name_arg, field_name_arg),
-    result_field(0), ref(0), reference_trough_name(1) {}
+    set_properties_only(0), result_field(0), ref(0), reference_trough_name(1) {}
   /*
     This constructor is used in two scenarios:
     A) *item = NULL
@@ -3388,7 +3388,7 @@ public:
 
   /* Constructor need to process subselect with temporary tables (see Item) */
   Item_ref(THD *thd, Item_ref *item)
-    :Item_ident(thd, item), result_field(item->result_field), ref(item->ref) {}
+    :Item_ident(thd, item), set_properties_only(0), result_field(item->result_field), ref(item->ref) {}
   enum Type type() const		{ return REF_ITEM; }
   enum Type real_type() const           { return ref ? (*ref)->type() :
                                           REF_ITEM; }
@@ -3713,7 +3713,7 @@ public:
     if (result_type() == ROW_RESULT)
       orig_item->bring_value();
   }
-  virtual bool is_expensive() { return orig_item->is_expensive(); }
+  bool is_expensive() { return orig_item->is_expensive(); }
   bool is_expensive_processor(uchar *arg)
   { return orig_item->is_expensive_processor(arg); }
   bool check_vcol_func_processor(uchar *arg)
@@ -3770,6 +3770,8 @@ public:
   bool eq(const Item *item, bool binary_cmp) const;
   Item *get_tmp_table_item(THD *thd)
   {
+    if (const_item())
+      return copy_or_same(thd);
     Item *item= Item_ref::get_tmp_table_item(thd);
     item->name= name;
     return item;
@@ -4324,6 +4326,10 @@ public:
   int save_in_field(Field *field_arg, bool no_conversions);
   table_map used_tables() const { return (table_map)0L; }
 
+  Field *get_tmp_table_field() { return 0; }
+  Item *get_tmp_table_item(THD *thd) { return this; }
+  Item_field *field_for_view_update() { return 0; }
+
   bool walk(Item_processor processor, bool walk_subquery, uchar *args)
   {
     return (arg && arg->walk(processor, walk_subquery, args)) ||
@@ -4364,6 +4370,8 @@ public:
    being treated as a constant and precalculated before execution
   */
   table_map used_tables() const { return RAND_TABLE_BIT; }
+
+  Item_field *field_for_view_update() { return 0; }
 
   bool walk(Item_processor processor, bool walk_subquery, uchar *args)
   {
